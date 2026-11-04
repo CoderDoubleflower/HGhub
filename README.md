@@ -4,10 +4,28 @@
 
 **黄果短剧第三方客户端 · Rust + Tauri 2**
 
-Windows / Android 双端 · Fluent 设计 · 沉浸式竖屏播放
+Web / Windows / Android · Docker 部署 · 手机浏览器访问 · Fluent 设计
 ![alt text](docs/image.png)
 
 </div>
+
+## Docker 网页版
+
+网页版保留现有界面和原生客户端，增加独立 Node.js 服务。iPhone、Android、电脑浏览器均可访问；网页访问账号与原有平台账号分开，平台登录态按浏览器会话隔离。所有接口、图片和视频使用同一套服务端代理配置。
+
+```bash
+cp .env.example .env
+# 编辑 .env，设置 HGHUB_ADMIN_PASSWORD（至少 12 位），可同时修改用户名和端口
+docker compose up -d --build
+```
+
+手机连接同一网络后，打开 `http://服务器局域网IP:3000`，用 `.env` 中的账号登录。在「我的」中可登录平台账号；「网络与代理」支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H，保存后立即生效，并提供连接测试。
+
+容器访问宿主机代理时，可使用 `http://host.docker.internal:7890`；代理程序需允许来自容器的连接。配置和会话保存在 Docker 数据卷，重建容器后保留。
+
+**完整说明：[Docker 部署、登录、代理与故障排查](docs/DOCKER.md)。**
+
+本地开发网页版：Node.js 22.14+（推荐 24），`pnpm install` 后配置 `.env`。分别运行 `pnpm web:dev` 和 `pnpm dev`，打开 Vite 提示的地址；生产方式为 `pnpm build && pnpm start`。`pnpm test` 运行不依赖真实平台账号或内容的服务端测试。
 
 > ⚠️ 本项目仅供 **学习与技术交流**，不提供、不存储、不分发任何音视频内容。
 > 所有内容均来自第三方站点，请自行判断合规性，并在 24 小时内删除相关资源。
@@ -20,6 +38,7 @@ Windows / Android 双端 · Fluent 设计 · 沉浸式竖屏播放
 | 壳 | Tauri 2（Rust 1.9x） |
 | 前端 | React 19 + TypeScript + Vite 7 + Tailwind CSS 4 |
 | 播放 | hls.js（HLS / AES-128） |
+| Web 服务 | Node.js HTTP 服务、服务端会话、HTTP / HTTPS / SOCKS 代理 |
 | 网络 | reqwest + rustls |
 | 图标 | 内联 SVG |
 
@@ -39,6 +58,8 @@ Windows / Android 双端 · Fluent 设计 · 沉浸式竖屏播放
 │     ├─ api.rs              业务命令
 │     ├─ media.rs            封面解密 + HLS 代理 + 缓存
 │     └─ session.rs          token 持久化
+├─ server/                   网页后端（登录、RPC、代理与流式媒体）
+├─ Dockerfile / compose.yaml Docker 构建与部署
 └─ docs/API.md               接口文档
 ```
 

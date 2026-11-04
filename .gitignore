@@ -24,3 +24,10 @@ Thumbs.db
 *.pem
 .env
 .env.*
+!.env.example
+
+# Web 服务持久数据与测试输出
+data/
+coverage/
+test-results/
+playwright-report/

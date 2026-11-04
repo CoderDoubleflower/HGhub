@@ -8,33 +8,123 @@ import type {
 /** 应用版本（构建时由 vite.config.ts 从 package.json 注入） */
 export const APP_VERSION = __APP_VERSION__;
 
+export const isNative = "__TAURI_INTERNALS__" in window;
 export const isAndroid = /Android/i.test(navigator.userAgent);
-export const platform: "android" | "windows" = isAndroid ? "android" : "windows";
+export type Platform = "android" | "windows" | "web-mobile" | "web-desktop";
+const mobileLayout = window.matchMedia("(max-width: 767px)");
+const handheld = /Android|iPhone|iPod|iPad/i.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 
-/** 自定义协议：Windows 与 Android 都是 http://<scheme>.localhost */
-const scheme = "http";
-export const LOCAL = `${scheme}://hg.localhost`;
+export function getPlatform(): Platform {
+  if (isNative) return isAndroid ? "android" : "windows";
+  return handheld || mobileLayout.matches ? "web-mobile" : "web-desktop";
+}
 
-/** 封面：经本地协议解密（站点封面是 AES 密文）。 */
+export function subscribePlatform(onChange: () => void) {
+  mobileLayout.addEventListener("change", onChange);
+  return () => mobileLayout.removeEventListener("change", onChange);
+}
+
+export const isMobilePlatform = (value: Platform) => value === "android" || value === "web-mobile";
+
+/** Native hosts use their custom protocol; browsers use the same authenticated origin. */
+export const LOCAL = isNative ? "http://hg.localhost" : "/media";
+export const AUTH_REQUIRED_EVENT = "hghub:auth-required";
+export const UPSTREAM_AUTH_REQUIRED_EVENT = "hghub:upstream-auth-required";
+
+export function isProxiedMedia(url: string): boolean {
+  if (isNative) return /^https?:\/\/hg\.localhost\/(?:img|hls|seg)\?/.test(url);
+  try {
+    const value = new URL(url, location.origin);
+    return value.origin === location.origin && /^\/media\/(?:img|hls|seg)$/.test(value.pathname);
+  } catch { return false; }
+}
+
+/** Images are decrypted on the server. */
 export const cover = (url?: string, _w = 480) =>
-  url ? `${LOCAL}/img?u=${encodeURIComponent(url)}` : "";
+  url ? (isProxiedMedia(url) ? url : `${LOCAL}/img?u=${encodeURIComponent(url)}`) : "";
 
-/** 播放列表：经本地协议改写分片地址，规避 CORS 与防盗链。 */
-export const playlist = (url: string) => `${LOCAL}/hls?u=${encodeURIComponent(url)}`;
+/** Playlist child resources are rewritten to the same media endpoint. */
+export const playlist = (url: string) => isProxiedMedia(url) ? url : `${LOCAL}/hls?u=${encodeURIComponent(url)}`;
 
-/* ── 调用封装 ───────────────────────────────────────────── */
+export class ApiError extends Error {
+  constructor(message: string, public readonly status = 0, public readonly code = "") {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 
-/** 写一行到应用数据目录 debug.log（用户反馈「打不开」时要的就是它） */
-export const logLine = (msg: string) => invoke("debug_log", { msg }).catch(() => {});
+/** JSON transport shared by the access gate, settings and native-command adapter. */
+export async function webRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 35_000);
+  const headers = new Headers(init.headers);
+  if (init.method && init.method !== "GET" && init.method !== "HEAD") {
+    headers.set("X-HGhub-Request", "1");
+    headers.set("Content-Type", "application/json");
+  }
+  try {
+    const response = await fetch(path, { ...init, headers, credentials: "same-origin", signal: controller.signal });
+    let result: unknown;
+    try { result = await response.json(); }
+    catch { throw new ApiError("服务返回了无效响应，请检查服务是否启动", response.status); }
+    if (!response.ok) {
+      const problem = result as { error?: string; code?: string };
+      if (response.status === 401 && problem.code === "AUTH_REQUIRED" && path !== "/api/auth/login") {
+        window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+      }
+      if (problem.code === "UPSTREAM_AUTH_REQUIRED") {
+        window.dispatchEvent(new Event(UPSTREAM_AUTH_REQUIRED_EVENT));
+      }
+      throw new ApiError(problem.error || `请求失败（${response.status}）`, response.status, problem.code);
+    }
+    return result as T;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError(controller.signal.aborted ? "请求超时，请稍后重试" : "无法连接服务，请检查网络后重试");
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export type AccessSession = { authenticated: boolean; username?: string };
+export type NetworkSettings = {
+  proxyUrl: string;
+  proxyConfigured: boolean;
+  proxySource: "environment" | "saved" | "direct";
+  upstreamBase: string;
+};
+export type NetworkTest = { ok: boolean; status?: number; ms: number; error?: string };
+
+export const webApi = {
+  session: () => webRequest<AccessSession>("/api/auth/session"),
+  login: (username: string, password: string) => webRequest<AccessSession>("/api/auth/login", {
+    method: "POST", body: JSON.stringify({ username, password }),
+  }),
+  logout: () => webRequest<{ ok: boolean }>("/api/auth/logout", { method: "POST", body: "{}" }),
+  settings: () => webRequest<NetworkSettings>("/api/settings"),
+  saveSettings: (proxyUrl: string) => webRequest<NetworkSettings>("/api/settings", {
+    method: "PUT", body: JSON.stringify({ proxyUrl }),
+  }),
+  testSettings: () => webRequest<NetworkTest>("/api/settings/test", { method: "POST", body: "{}" }),
+};
+
+/** Native debugging keeps its existing log; browser diagnostics stay in the console. */
+export const logLine = (msg: string): Promise<void> => isNative
+  ? invoke<void>("debug_log", { msg }).catch(() => {})
+  : Promise.resolve();
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
-    return (await invoke(cmd, args)) as T;
+    if (isNative) return await invoke<T>(cmd, args);
+    const result = await webRequest<{ data: T }>(`/api/rpc/${cmd}`, {
+      method: "POST", body: JSON.stringify(args || {}),
+    });
+    return result.data;
   } catch (e) {
-    const msg = typeof e === "string" ? e : "请求失败，请检查网络";
-    // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
+    const msg = typeof e === "string" ? e : e instanceof Error ? e.message : "请求失败，请检查网络";
     logLine(`[api] ${cmd} → ${msg}`);
-    throw new Error(msg.length > 140 ? `${msg.slice(0, 140)}…` : msg);
+    throw new Error(msg.length > 240 ? `${msg.slice(0, 240)}…` : msg);
   }
 }
 
@@ -69,10 +159,10 @@ export const api = {
   commentSend: (id: number, ep: number, text: string, replyId?: number) =>
     call<unknown>("api_comment_send", { id, ep, text, replyId: replyId ?? null }),
 
-  clearCache: () => invoke<void>("cache_clear"),
-  netDiag: () => invoke<Record<string, unknown>>("net_diag"),
-  postLike: (id: number, on: boolean) => invoke<unknown>("api_post_like", { id, on }),
-  postCollect: (id: number, on: boolean) => invoke<unknown>("api_post_collect", { id, on }),
+  clearCache: () => call<void>("cache_clear"),
+  netDiag: () => call<Record<string, unknown>>("net_diag"),
+  postLike: (id: number, on: boolean) => call<unknown>("api_post_like", { id, on }),
+  postCollect: (id: number, on: boolean) => call<unknown>("api_post_collect", { id, on }),
   postComments: (id: number, page: number, size: number) => call<CommentPage>("api_post_comments", { id, page, size }),
   like: (id: number, ep: number, on: boolean) => call<unknown>("api_like", { id, ep, on }),
   collect: (id: number, on: boolean) => call<unknown>("api_collect", { id, on }),
@@ -178,10 +268,11 @@ export async function mediaPlaybackProbe(): Promise<string> {
 }
 /** 非 m3u8 媒体（mp4 等）走 /seg 原样透传 */
 export function directMedia(url: string): string {
-  return `${LOCAL}/seg?u=${encodeURIComponent(url)}`;
+  return isProxiedMedia(url) ? url : `${LOCAL}/seg?u=${encodeURIComponent(url)}`;
 }
 
 /** 按扩展名选择代理方式：m3u8 → 播放列表改写；其它 → 原样透传 */
 export function mediaUrl(url: string): string {
-  return /\.m3u8(\?|$)/i.test(url) ? playlist(url) : directMedia(url);
+  if (isProxiedMedia(url)) return url;
+  return /\.m3u8(?:[?#]|$)/i.test(url) ? playlist(url) : directMedia(url);
 }

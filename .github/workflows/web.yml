@@ -1,0 +1,60 @@
+name: Web and Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:browser
+      - name: Save browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Validate Compose
+        run: docker compose config --quiet
+        env:
+          HGHUB_ADMIN_PASSWORD: ci-fixture-password-only
+      - name: Build and smoke-test container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t hghub-web:test .
+          docker run -d --name hghub-test --read-only --tmpfs /tmp \
+            -e HGHUB_ADMIN_PASSWORD=ci-fixture-password-only \
+            -p 127.0.0.1:3000:3000 hghub-web:test
+          trap 'docker logs hghub-test; docker rm -f hghub-test' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/healthz; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3000/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/settings)" = 401
+          curl --fail --silent -c /tmp/hghub.cookies \
+            -H 'Origin: http://127.0.0.1:3000' -H 'X-HGhub-Request: 1' \
+            -H 'Content-Type: application/json' \
+            --data '{"username":"admin","password":"ci-fixture-password-only"}' \
+            http://127.0.0.1:3000/api/auth/login
+          curl --fail --silent -b /tmp/hghub.cookies http://127.0.0.1:3000/api/settings

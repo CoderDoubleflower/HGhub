@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, forwardRef, useState } from "react";
 import Hls from "hls.js";
-import { playlist } from "../api";
+import { isNative, mediaUrl } from "../api";
 
 export type VideoHandle = {
   el: () => HTMLVideoElement | null;
@@ -44,15 +44,17 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const [ready, setReady] = useState(false);
+  const latest = useRef({ autoPlay, muted, volume, rate, onPause, onError });
+  latest.current = { autoPlay, muted, volume, rate, onPause, onError };
 
   useImperativeHandle(ref, () => ({
     el: () => videoRef.current,
-    play: () => { videoRef.current?.play().catch(() => {}); },
+    play: () => { videoRef.current?.play().catch(() => latest.current.onPause?.()); },
     pause: () => videoRef.current?.pause(),
     toggle: () => {
       const v = videoRef.current;
       if (!v) return;
-      if (v.paused) v.play().catch(() => {}); else v.pause();
+      if (v.paused) v.play().catch(() => latest.current.onPause?.()); else v.pause();
     },
     seek: (t: number) => { const v = videoRef.current; if (v && Number.isFinite(t)) v.currentTime = t; },
     rate: (r: number) => { const v = videoRef.current; if (v) v.playbackRate = r; },
@@ -62,25 +64,32 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !src) return;
+    if (!video) return;
     setReady(false);
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+    if (!src) { video.removeAttribute("src"); video.load(); return; }
 
-    const proxied = /^https?:\/\/hg\.localhost\//.test(src);
-    const url = proxied ? src : playlist(src);
+    const url = mediaUrl(src);
     const useHls = !url.includes("/seg?u=");
 
     /* 换源时先把音量/倍速套回去：hls 重新 attach 后浏览器会把它们重置成默认值 */
     const applySettings = () => {
       const v = videoRef.current;
       if (!v) return;
-      v.volume = volume;
-      v.muted = muted;
-      v.playbackRate = rate;
+      v.volume = latest.current.volume;
+      v.muted = latest.current.muted;
+      v.playbackRate = latest.current.rate;
     };
     applySettings();
 
-    if (useHls && Hls.isSupported()) {
+    const autoplay = () => {
+      if (latest.current.autoPlay) video.play().catch(() => latest.current.onPause?.());
+    };
+    // Safari's native HLS also works without MediaSource and keeps iPhone playback inline.
+    const nativeHls = !isNative && Boolean(video.canPlayType("application/vnd.apple.mpegurl"));
+    if (useHls && !nativeHls && Hls.isSupported()) {
+      let networkRecoveries = 0;
+      let mediaRecoveries = 0;
       const hls = new Hls({
         enableWorker: true,
         maxBufferLength: 30,
@@ -92,23 +101,26 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
       hlsRef.current = hls;
       hls.loadSource(url);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (autoPlay) video.play().catch(() => {});
-      });
+      hls.on(Hls.Events.MANIFEST_PARSED, autoplay);
       hls.on(Hls.Events.ERROR, (_e, data) => {
         if (!data.fatal) return;
-        onError?.(`${data.type}/${data.details}`);
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-        else { hls.destroy(); hlsRef.current = null; }
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries++ < 2) hls.startLoad();
+        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries++ < 1) hls.recoverMediaError();
+        else {
+          latest.current.onError?.(data.type === Hls.ErrorTypes.NETWORK_ERROR ? "视频加载失败，请检查代理和网络后重试" : "当前视频无法播放，请尝试其他集数或浏览器");
+          hls.destroy(); hlsRef.current = null;
+        }
       });
     } else {
       video.src = url;
-      if (autoPlay) video.play().catch(() => {});
+      autoplay();
     }
 
     return () => {
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
@@ -128,6 +140,8 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
       ref={videoRef}
       poster={poster}
       playsInline
+      muted={muted}
+      preload="metadata"
       loop={loop}
       onClick={onClick}
       className={`w-full h-full bg-black ${fit === "cover" ? "object-cover" : "object-contain"} ${className}`}
@@ -145,6 +159,10 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
       onWaiting={() => onWaiting?.()}
       onPlaying={() => onPlaying?.()}
       onEnded={() => onEnded?.()}
+      onError={(event) => {
+        const error = event.currentTarget.error;
+        if (error && error.code !== MediaError.MEDIA_ERR_ABORTED) onError?.(error.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED ? "当前浏览器不支持此视频格式" : "视频加载失败，请检查网络后重试");
+      }}
     />
   );
 });

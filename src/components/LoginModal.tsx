@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../api";
+import { api, isNative } from "../api";
 import type { User } from "../types";
 import { useStore } from "../store";
 import { Modal } from "./ui";
@@ -15,6 +15,7 @@ export default function LoginModal() {
   const [err, setErr] = useState("");
 
   const submit = async () => {
+    if (busy) return;
     if (!username.trim() || !password) { setErr("请输入账号与密码"); return; }
     setBusy(true);
     setErr("");
@@ -38,8 +39,8 @@ export default function LoginModal() {
       <div className="p-5">
         <div className="flex items-center gap-2 mb-3">
           <span className="w-8 h-8 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center"><ILogin size={16} /></span>
-          <span className="text-[15px] font-bold text-on">{mode === "login" ? "登录 HGhub" : "注册 HGhub"}</span>
-          <button onClick={() => setLoginOpen(false)} className="ml-auto w-7 h-7 rounded-full bg-s4 flex items-center justify-center text-mut pressable">
+          <span className="text-[15px] font-bold text-on">{mode === "login" ? "登录平台账号" : "注册平台账号"}</span>
+          <button onClick={() => setLoginOpen(false)} aria-label="关闭登录窗口" className="ml-auto w-9 h-9 rounded-full bg-s4 flex items-center justify-center text-mut pressable">
             <IClose size={13} />
           </button>
         </div>
@@ -52,23 +53,23 @@ export default function LoginModal() {
         </div>
 
         <div className="flex flex-col gap-2.5">
-          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="账号"
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="平台账号" aria-label="平台账号" autoComplete="username" autoCapitalize="none" spellCheck={false} maxLength={128}
             className="h-10 px-3.5 rounded-(--r-sm) bg-s2 text-[13px] text-on placeholder-dim outline-none focus:bg-s4" />
-          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="密码"
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="平台密码" aria-label="平台密码" autoComplete={mode === "login" ? "current-password" : "new-password"} maxLength={1024}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
             className="h-10 px-3.5 rounded-(--r-sm) bg-s2 text-[13px] text-on placeholder-dim outline-none focus:bg-s4" />
           {mode === "register" && (
-            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱（可选）"
+            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="邮箱（可选）" aria-label="邮箱（可选）" autoComplete="email" maxLength={254}
               className="h-10 px-3.5 rounded-(--r-sm) bg-s2 text-[13px] text-on placeholder-dim outline-none focus:bg-s4" />
           )}
-          {err && <div className="text-[11.5px] text-danger">{err}</div>}
+          {err && <div role="alert" className="text-[12px] text-danger">{err}</div>}
           <button onClick={submit} disabled={busy}
             className="h-10 rounded-(--r-ctl) bg-primary text-on-primary text-[13px] font-bold pressable disabled:opacity-60">
             {busy ? "处理中…" : mode === "login" ? "登录" : "注册并登录"}
           </button>
         </div>
         <p className="text-[10.5px] text-dim mt-3 leading-relaxed">
-          使用黄果短剧官网账号登录，登录态仅保存在本机。
+          {isNative ? "使用原平台账号登录，登录态仅保存在本机。" : "使用原平台账号登录。平台登录态保存在当前浏览器对应的服务端会话中。"}
         </p>
       </div>
     </Modal>

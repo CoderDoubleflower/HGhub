@@ -1,0 +1,30 @@
+services:
+  hghub:
+    build: .
+    image: hghub-web:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${HGHUB_BIND:-0.0.0.0}:${HGHUB_PORT:-3000}:3000"
+    environment:
+      HGHUB_ADMIN_USERNAME: ${HGHUB_ADMIN_USERNAME:-admin}
+      HGHUB_ADMIN_PASSWORD: ${HGHUB_ADMIN_PASSWORD:?请先在 .env 中设置至少 12 位的 HGHUB_ADMIN_PASSWORD}
+      HGHUB_PROXY: ${HGHUB_PROXY:-}
+      HGHUB_UPSTREAM_BASE: ${HGHUB_UPSTREAM_BASE:-https://huangguoai.com}
+      HGHUB_MEDIA_HOSTS: ${HGHUB_MEDIA_HOSTS:-}
+      HGHUB_PUBLIC_ORIGIN: ${HGHUB_PUBLIC_ORIGIN:-}
+      HGHUB_COOKIE_SECURE: ${HGHUB_COOKIE_SECURE:-false}
+    volumes:
+      - hghub-data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  hghub-data:

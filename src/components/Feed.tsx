@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, cover, fmt, fmtTime, mediaUrl, platform } from "../api";
+import { api, cover, fmt, fmtTime, isMobilePlatform, mediaUrl } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Avatar, Img, Sheet } from "./ui";
@@ -32,7 +32,7 @@ const stripHtml = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, "
 export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd }: Props) {
   const store = useStore();
   const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen } = store;
-  const isDesktop = platform === "windows";
+  const isDesktop = !isMobilePlatform(store.platform);
 
   const boxRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<VideoHandle>(null);
@@ -40,6 +40,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const [epMap, setEpMap] = useState<Record<number, number>>({});
   const [details, setDetails] = useState<Record<number, Detail>>({});
   const [playUrls, setPlayUrls] = useState<Record<string, string>>({});
+  const [playbackAttempt, setPlaybackAttempt] = useState(0);
   const [cards, setCards] = useState<Record<number, VideoCard>>({});
   const [posts, setPosts] = useState<Record<number, Post>>({});
 
@@ -97,9 +98,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const detail = details[curId];
   const curEp = epMap[curId] || 1;
   const playKey = `${curId}:${curEp}`;
-  const playUrl = playUrls[playKey] || "";
   const episodes = detail?.episodes || [];
   const post = posts[curId];
+  const playUrl = kind === "post" ? post?.video_url || "" : playUrls[playKey] || "";
 
   /** 统一视图模型：短剧与吃瓜帖子共用同一套播放界面 */
   const meta = kind === "post"
@@ -132,7 +133,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   const posterUrl = cover(meta.cover, 900);
   const hasVideo = kind === "video" || !!post?.video_url;
-  const articleHtml = kind === "post" && !hasVideo ? sanitizeHtml(post?.content || "") : "";
+  const articleHtml = kind === "post" ? sanitizeHtml(post?.content || "") : "";
 
   /* 倍速：长按 / 锁定 → 2.0x，否则用基准倍速 */
   const effRate = holdSpeed || speedLock ? 2 : rate;
@@ -171,6 +172,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   /* 拉详情（当前 + 邻接预取） */
   useEffect(() => {
+    if (kind !== "video") return;
     let alive = true;
     const need = [videoIds[index], videoIds[index + 1], videoIds[index - 1]].filter(Boolean);
     need.forEach((id) => {
@@ -179,7 +181,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, videoIds]);
+  }, [kind, index, videoIds]);
 
   /* 吃瓜帖子：直接拿帖子详情（含 video_url） */
   useEffect(() => {
@@ -195,7 +197,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   /* 拉播放地址 */
   useEffect(() => {
-    if (!curId) return;
+    if (!curId || kind !== "video") return;
     if (playUrls[playKey]) return;
     let alive = true;
     api.play(curId, curEp)
@@ -208,7 +210,27 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       .catch((e) => { if (alive) setErr((e as Error).message || "取播放地址失败"); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [curId, curEp]);
+  }, [kind, curId, curEp]);
+
+  const retryPlayback = async () => {
+    setErr("");
+    setWaiting(true);
+    try {
+      if (kind === "post") {
+        const latest = await api.post(curId);
+        if (!latest.video_url) throw new Error("暂无播放地址");
+        setPosts((previous) => ({ ...previous, [curId]: latest }));
+      } else {
+        const latest = await api.play(curId, curEp);
+        if (!latest.video_url) throw new Error("暂无播放地址");
+        setPlayUrls((previous) => ({ ...previous, [playKey]: latest.video_url }));
+      }
+      setPlaybackAttempt((value) => value + 1);
+    } catch (error) {
+      setWaiting(false);
+      setErr((error as Error).message || "取播放地址失败");
+    }
+  };
 
   /* 切换条目/集数时重置播放状态 */
   useEffect(() => {
@@ -269,8 +291,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const toggleFull = () => {
     const el = boxRef.current?.parentElement;
     if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else el.requestFullscreen().catch(() => {});
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    else if (el.requestFullscreen) el.requestFullscreen().catch(() => toast("此浏览器暂时无法全屏", "info"));
+    else {
+      const video = videoRef.current?.el() as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
+      if (video?.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      else toast("此浏览器暂时无法全屏", "info");
+    }
   };
 
   /* —— 长按 2x（上滑锁定） / 横拖定位 / 单击暂停 —— */
@@ -477,14 +504,14 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               {isActive && playUrl ? (
                 <div className="absolute inset-0" style={{ touchAction: "pan-y" }}
                   onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
-                <VideoSurface ref={videoRef} src={playUrl} poster={posterUrl} autoPlay muted={muted}
+                <VideoSurface key={`${playKey}:${playbackAttempt}`} ref={videoRef} src={playUrl} poster={posterUrl} autoPlay={active} muted={muted}
                   volume={volume} rate={effRate}
                   fit={isDesktop || (vsize.w > 0 && vsize.w > vsize.h) ? "contain" : "cover"}
                   onClick={() => { if (isDesktop) videoRef.current?.toggle(); }}
                   onTime={setTime}
                   onDuration={setDuration}
                   onSize={(w, h) => setVsize({ w, h })}
-                  onPlaying={() => { setPaused(false); setWaiting(false); }}
+                  onPlaying={() => { setPaused(false); setWaiting(false); setErr(""); }}
                   onPause={() => setPaused(true)}
                   onWaiting={() => setWaiting(true)}
                   onEnded={() => { const next = episodes.find((e) => e.ep_num === curEp + 1); if (next) pickEp(next.ep_num); }}
@@ -650,7 +677,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                   <div className="bg-black/70 rounded-xl p-5 flex flex-col items-center gap-3 text-[13px] text-white/90">
                     <span>视频暂时无法加载</span>
                     <span className="text-[10.5px] text-white/45 max-w-[240px] text-center break-all">{err}</span>
-                    <button className="text-primary text-[12.5px]" onClick={() => { setErr(""); setWaiting(true); videoRef.current?.play(); }}>重试</button>
+                    <button className="text-primary text-[12.5px] min-h-11 px-4" onClick={retryPlayback}>重试</button>
                   </div>
                 </div>
               )}
@@ -772,17 +799,21 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               <EpisodesPanel videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
             ) : panel === "comments" ? (
               <CommentsPanel videoId={curId} ep={curEp} total={meta.comment} kind={kind} onClose={() => setPanel(null)} />
+            ) : panel === "article" ? (
+              <ArticlePanel title={meta.title} html={articleHtml} cover={posterUrl} hot={post?.hot} onClose={() => setPanel(null)} />
             ) : null}
           </div>
         </div>
       ) : (
         <Sheet open={panel !== null} onClose={() => setPanel(null)}>
-          <div className="flex flex-col h-full" style={{ height: "72vh" }}>
+          <div className="flex flex-col h-full" style={{ height: "72dvh" }}>
             {panel === "episodes" ? (
               <EpisodesPanel videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
-            ) : (
+            ) : panel === "article" ? (
+              <ArticlePanel title={meta.title} html={articleHtml} cover={posterUrl} hot={post?.hot} onClose={() => setPanel(null)} />
+            ) : panel === "comments" ? (
               <CommentsPanel videoId={curId} ep={curEp} total={meta.comment} kind={kind} onClose={() => setPanel(null)} />
-            )}
+            ) : null}
           </div>
         </Sheet>
       )}

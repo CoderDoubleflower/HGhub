@@ -13,17 +13,24 @@
     "android:init": "tauri android init",
     "android:icons": "node scripts/sync-android-icons.mjs",
     "android:dev": "tauri android dev",
-    "android:build": "tauri android build"
+    "android:build": "tauri android build",
+    "web:dev": "node --env-file-if-exists=.env --watch server/app.mjs",
+    "start": "node --env-file-if-exists=.env server/app.mjs",
+    "test": "node --test server/*.test.mjs",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
     "clsx": "2.1.1",
     "hls.js": "1.6.15",
+    "ipaddr.js": "2.3.0",
+    "proxy-agent": "8.0.2",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "tailwind-merge": "3.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@tailwindcss/vite": "4.1.17",
     "@tauri-apps/cli": "2.10.1",
     "@types/node": "22.19.17",
@@ -38,5 +45,9 @@
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "packageManager": "pnpm@10.11.0",
+  "engines": {
+    "node": ">=22.14.0"
   }
 }
