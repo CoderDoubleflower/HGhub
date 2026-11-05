@@ -93,6 +93,9 @@ async function touchSeek(page, cdp, video, slider, box, release) {
   await expect(video).toHaveJSProperty('paused', true);
   await expect(video).toHaveJSProperty('currentSrc', before.source);
   expect(await video.evaluate((element) => element.currentTime)).toBeGreaterThan(before.time + before.duration * 0.25);
+  // A neutral HTML probe reproduced Chromium suppressing a tap immediately after a drag.
+  // Allow the browser to finish this gesture before starting a separate finger gesture.
+  await page.waitForTimeout(500);
 }
 
 async function touchTap(page, cdp, target) {
@@ -134,10 +137,12 @@ async function touchTap(page, cdp, target) {
     }
   });
   try {
-    // Let Chromium generate one complete touch tap through its gesture-recognition path.
-    await cdp.send('Input.synthesizeTapGesture', {
-      x: point.x, y: point.y, duration: 50, tapCount: 1, gestureSourceType: 'touch',
-    });
+    // Send one sequential touch tap on the same CDP session as dragging.
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [
+      { x: point.x, y: point.y, id: 1, radiusX: 1, radiusY: 1, force: 1 },
+    ] });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await expect.poll(() => page.evaluate(() => ['pointerdown', 'pointerup', 'click'].every((type) =>
       window.__mobileTapTrace.some((event) => event.type === type && event.trusted && event.atTarget
         && (type === 'click' || event.pointerType === 'touch')),
@@ -147,15 +152,13 @@ async function touchTap(page, cdp, target) {
   }
 }
 
-async function checkTouchEnvironment(page, stage) {
+async function checkTouchEnvironment(page) {
   const state = await page.evaluate(() => ({
     maxTouchPoints: navigator.maxTouchPoints,
     coarse: matchMedia('(pointer: coarse)').matches,
-    viewport: { width: innerWidth, height: innerHeight, scale: visualViewport?.scale },
   }));
-  console.log('[mobile-seek] Touch environment:', JSON.stringify({ stage, ...state }));
-  expect(state.maxTouchPoints, `${stage}: mobile touch support must remain enabled`).toBeGreaterThan(0);
-  expect(state.coarse, `${stage}: the phone must retain a coarse pointer`).toBeTruthy();
+  expect(state.maxTouchPoints, 'Mobile touch support must be enabled').toBeGreaterThan(0);
+  expect(state.coarse, 'The phone must have a coarse pointer').toBeTruthy();
 }
 
 test.beforeEach(async ({ context, request }) => {
@@ -282,7 +285,7 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
   try {
     await page.goto(noLoginURL);
     await expect(navigation(page)).toBeVisible();
-    await checkTouchEnvironment(page, 'initial');
+    await checkTouchEnvironment(page);
     // Establish navigation before any seek, resize, or screenshot can affect the input environment.
     await touchTap(page, cdp, navigation(page).getByRole('button', { name: '分类', exact: true }));
     await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
@@ -294,9 +297,7 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
     const video = page.locator('.player-root:visible video').first();
 
     for (const height of [844, 600]) {
-      await checkTouchEnvironment(page, `before-resize-390x${height}`);
       await page.setViewportSize({ width: 390, height });
-      await checkTouchEnvironment(page, `after-resize-390x${height}`);
       const box = await mobileSliderBox(slider);
       const navBox = await navigation(page).boundingBox();
       expect(navBox).not.toBeNull();
@@ -314,9 +315,7 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
         y: categoryBox.y + categoryBox.height / 2,
       });
       await expect(navigation(page).getByRole('button', { name: '首页', exact: true })).toHaveAttribute('aria-current', 'page');
-      await checkTouchEnvironment(page, `before-home-screenshot-390x${height}`);
       await page.screenshot({ path: testInfo.outputPath(`mobile-seek-home-390x${height}.png`) });
-      await checkTouchEnvironment(page, `after-home-screenshot-390x${height}`);
     }
 
     await touchTap(page, cdp, navigation(page).getByRole('button', { name: '分类', exact: true }));
@@ -330,9 +329,7 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
       y: contextBox.y + contextBox.height / 2,
     });
     await expect(navigation(page)).toHaveCount(0);
-    await checkTouchEnvironment(page, 'before-context-screenshot');
     await page.screenshot({ path: testInfo.outputPath('mobile-seek-context-390x600.png') });
-    await checkTouchEnvironment(page, 'after-context-screenshot');
     await touchTap(page, cdp, page.getByRole('button', { name: '返回', exact: true }).first());
     await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
     await touchTap(page, cdp, navigation(page).getByRole('button', { name: '首页', exact: true }));

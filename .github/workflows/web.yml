@@ -28,8 +28,6 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
-      - name: Diagnose touch input
-        run: node tests/touch-driver-probe.mjs
       - run: pnpm test:browser
       - name: Save mobile seek layout screenshots
         if: always()
