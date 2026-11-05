@@ -134,13 +134,10 @@ async function touchTap(page, cdp, target) {
     }
   });
   try {
-    // Keep taps on the same touch input session as dragging. Playwright's shortcut
-    // sends start/end concurrently on its own session; a finger stays down for a frame.
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [
-      { x: point.x, y: point.y, id: 1, radiusX: 1, radiusY: 1, force: 1 },
-    ] });
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    // Let Chromium generate one complete touch tap through its gesture-recognition path.
+    await cdp.send('Input.synthesizeTapGesture', {
+      x: point.x, y: point.y, duration: 50, tapCount: 1, gestureSourceType: 'touch',
+    });
     await expect.poll(() => page.evaluate(() => ['pointerdown', 'pointerup', 'click'].every((type) =>
       window.__mobileTapTrace.some((event) => event.type === type && event.trusted && event.atTarget
         && (type === 'click' || event.pointerType === 'touch')),
