@@ -16,6 +16,21 @@ docker compose logs --tail=100 hghub
 
 首次构建需要访问 Node / Alpine 镜像仓库和 npm registry；独立远程构建的 Compose 文件还需要访问 GitHub。应用内的代理设置只影响运行后的请求，不负责 Docker 构建阶段联网。
 
+### 镜像加速源返回 401 / 403
+
+若日志在 `load metadata for node:24-alpine` 阶段显示 `docker.fnnas.com` 等加速地址返回 `401 Unauthorized`，失败发生在拉取构建镜像之前，与网页登录、应用代理或 Git 提交无关。Git 步骤若随后显示成功获取 `FETCH_HEAD` 和 `DONE`，不需要因为此前的临时 object-not-found 信息修改提交引用。
+
+项目支持分别指定 Node 构建镜像和目录初始化镜像。可在项目旁的 `.env` 中加入：
+
+```dotenv
+HGHUB_NODE_IMAGE=public.ecr.aws/docker/library/node:24-alpine
+HGHUB_INIT_IMAGE=public.ecr.aws/docker/library/alpine:3.22
+```
+
+然后重新执行 `docker compose up -d --build`。这两个地址来自 [Docker 官方在 Amazon ECR Public 的分发入口](https://www.docker.com/press-release/docker-official-images-available-amazon-elastic-container-registry/)，不使用 Docker Hub 加速源；ECR Public 支持匿名拉取，不需要 AWS 账号。也可先分别执行 `docker pull` 检查本机是否能访问这两个地址。
+
+独立 Compose 文件已直接设置上述镜像地址，不需要另外创建 `.env`。若使用自己的构建配置，`build.args.NODE_IMAGE` 必须与 `data-init.image` 一起调整，以免 Node 镜像成功后又卡在 Alpine 镜像。该配置不会改动宿主机全局 Docker 设置，也不需要重启其他容器。
+
 Compose 包含两个服务：
 
 - `data-init`：准备本地 `./data` 的权限，完成后退出；`Exited (0)` 是正常状态。

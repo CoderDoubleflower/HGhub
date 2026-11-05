@@ -2,7 +2,7 @@ name: hghub
 
 services:
   data-init:
-    image: alpine:3.22
+    image: ${HGHUB_INIT_IMAGE:-alpine:3.22}
     user: "0:0"
     network_mode: none
     restart: "no"
@@ -20,7 +20,10 @@ services:
       - no-new-privileges:true
 
   hghub:
-    build: .
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${HGHUB_NODE_IMAGE:-node:24-alpine}
     image: hghub-web:local
     depends_on:
       data-init:

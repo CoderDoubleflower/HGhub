@@ -1,4 +1,5 @@
-FROM node:24-alpine AS base
+ARG NODE_IMAGE=node:24-alpine
+FROM ${NODE_IMAGE} AS base
 WORKDIR /app
 RUN npm install --global pnpm@10.11.0
 
@@ -14,7 +15,7 @@ FROM base AS production-dependencies
 COPY package.json pnpm-lock.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts
 
-FROM node:24-alpine AS runtime
+FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     HGHUB_HOST=0.0.0.0 \
