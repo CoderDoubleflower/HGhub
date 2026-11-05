@@ -15,6 +15,9 @@ import { WindowsRail, WindowsTitleBar } from "./components/WindowsChrome";
 import ResizeHandles from "./components/ResizeHandles";
 import { IMoon, ISearch, ISidebar, ISun, Logo } from "./icons";
 
+// The player reserves this exact height; the bottom safe area is added separately.
+const MOBILE_TAB_BAR_HEIGHT = 42;
+
 /* ============ 底部标签栏（Android）—— 细瘦纯文字、低侵入 ============ */
 function TabBar() {
   const { tab, setTab } = useStore();
@@ -28,7 +31,7 @@ function TabBar() {
   return (
     <nav className={`absolute bottom-0 inset-x-0 z-30 ${onVideo ? "" : "bg-s2/95 elev-up"}`} aria-label="主导航"
       style={{ paddingBottom: "var(--sab, 0px)" }}>
-      <div className="h-[42px] flex items-center px-1">
+      <div className="flex items-center px-1" style={{ height: MOBILE_TAB_BAR_HEIGHT }}>
         {items.map(({ k, label }) => {
           const on = tab === k;
           return (
@@ -101,7 +104,7 @@ function AppBody() {
 
   const vis = (k: Tab) => (tab === k ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none");
   const pageActive = stack.length === 0 && !loginOpen;
-  const bottomInset = fs ? 0 : 48;
+  const bottomInset = fs ? 0 : MOBILE_TAB_BAR_HEIGHT;
   /* 栈页（从搜索/分类/我的进入的播放页、图文页）不显示底栏：
      底栏会盖住评论抽屉的输入框，且这些页面本身是沉浸的 */
   const stackInset = fs ? 0 : 20;

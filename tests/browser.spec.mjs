@@ -35,6 +35,66 @@ async function localTrafficOnly(context) {
     ? route.continue() : route.abort('blockedbyclient'));
 }
 
+async function mobileSliderBox(slider) {
+  await expect(slider).toHaveAttribute('aria-disabled', 'false');
+  await expect(slider).toHaveAttribute('aria-orientation', 'horizontal');
+  // Wait for the context page's entrance animation before using viewport coordinates.
+  await slider.scrollIntoViewIfNeeded();
+  const box = await slider.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box.height).toBeGreaterThanOrEqual(44);
+  expect(await slider.evaluate((element) => getComputedStyle(element).getPropertyValue('--sab').trim())).toBe('34px');
+  const hits = await slider.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return [0.1, 0.5, 0.9].flatMap((fraction) => [2, rect.height / 2, rect.height - 2].map((offset) => {
+      const x = rect.left + rect.width * fraction;
+      const y = rect.top + offset;
+      return { x, y, hit: element.contains(document.elementFromPoint(x, y)) };
+    }));
+  });
+  expect(hits.filter((point) => !point.hit), 'Every sampled point in the seek touch area must hit the slider').toEqual([]);
+  return box;
+}
+
+async function touchSeek(page, cdp, video, slider, box, release) {
+  await expect.poll(() => video.evaluate((element) => element.readyState >= 2
+    && element.videoWidth > 0 && Number.isFinite(element.duration) && element.duration > 0), { timeout: 20_000 }).toBeTruthy();
+  // A paused synthetic clip makes time changes attributable to the touch gesture.
+  await video.evaluate((element) => { element.pause(); element.currentTime = element.duration * 0.1; });
+  await expect.poll(() => video.evaluate((element) => element.paused && !element.seeking)).toBeTruthy();
+  const before = await video.evaluate((element) => ({ time: element.currentTime, duration: element.duration, source: element.currentSrc }));
+  await slider.evaluate((element) => {
+    window.__seekTouches = [];
+    for (const type of ['pointerdown', 'pointermove', 'pointerup']) {
+      element.addEventListener(type, (event) => {
+        window.__seekTouches.push({ type, pointerType: event.pointerType, trusted: event.isTrusted });
+      }, { once: true, passive: true });
+    }
+  });
+  const start = { x: box.x + box.width * 0.15, y: box.y + box.height / 2 };
+  const finger = (point) => ({ ...point, id: 1, radiusX: 1, radiusY: 1, force: 1 });
+  // CDP dispatches browser-level touch input, including real pointer capture and touch-action handling.
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [finger(start)] });
+  for (let step = 1; step <= 8; step += 1) {
+    const fraction = step / 8;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [finger({
+      x: start.x + (release.x - start.x) * fraction,
+      y: start.y + (release.y - start.y) * fraction,
+    })] });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  expect(await page.evaluate(() => window.__seekTouches)).toEqual(
+    ['pointerdown', 'pointermove', 'pointerup'].map((type) => ({ type, pointerType: 'touch', trusted: true })),
+  );
+  const target = (release.x - box.x) / box.width;
+  await expect.poll(() => video.evaluate((element, fraction) => Math.abs(element.currentTime / element.duration - fraction), target)).toBeLessThan(0.04);
+  await expect.poll(() => video.evaluate((element) => !element.seeking && element.readyState >= 2)).toBeTruthy();
+  await expect(video).toHaveJSProperty('paused', true);
+  await expect(video).toHaveJSProperty('currentSrc', before.source);
+  expect(await video.evaluate((element) => element.currentTime)).toBeGreaterThan(before.time + before.duration * 0.25);
+}
+
 test.beforeEach(async ({ context, request }) => {
   const response = await request.post(`${proxyURL}/__fixture/reset`);
   expect(response.ok()).toBeTruthy();
@@ -150,6 +210,61 @@ test('无需平台登录即可设置代理，并通过代理真正播放加密 H
     return ['/api/edge/request', '/cover.aes', '/master.m3u8', '/stream.m3u8', '/key.bin', '/stream0.ts'].every((path) => paths.includes(path));
   }).toBeTruthy();
   await noHorizontalOverflow(page);
+});
+
+test('手机安全区内进度条避开导航，真实触摸可拖动并支持无底栏播放页', async ({ page, context }, testInfo) => {
+  test.skip(!testInfo.project.use.isMobile, 'This regression requires the mobile touch browser project');
+  test.setTimeout(75_000);
+  const cdp = await context.newCDPSession(page);
+  try {
+    await page.goto(noLoginURL);
+    await expect(navigation(page)).toBeVisible();
+    // Chromium has no physical home indicator; exercise the same inherited CSS safe-area value.
+    await page.addStyleTag({ content: '.plat-web-mobile { --sab: 34px !important; }' });
+    const slider = page.getByRole('slider', { name: '播放进度', exact: true });
+    const video = page.locator('.player-root:visible video').first();
+
+    for (const height of [844, 600]) {
+      await page.setViewportSize({ width: 390, height });
+      const box = await mobileSliderBox(slider);
+      const navBox = await navigation(page).boundingBox();
+      expect(navBox).not.toBeNull();
+      expect(await navigation(page).evaluate((element) => getComputedStyle(element).paddingBottom)).toBe('34px');
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.y + box.height, 'The full seek touch area must be above the navigation').toBeLessThanOrEqual(navBox.y);
+      expect(navBox.y + navBox.height).toBeLessThanOrEqual(height);
+      await noHorizontalOverflow(page);
+
+      const categoryBox = await navigation(page).getByRole('button', { name: '分类', exact: true }).boundingBox();
+      expect(categoryBox).not.toBeNull();
+      // Let the finger drift onto a navigation button before release: capture must retain the seek.
+      await touchSeek(page, cdp, video, slider, box, {
+        x: categoryBox.x + categoryBox.width / 2,
+        y: categoryBox.y + categoryBox.height / 2,
+      });
+      await expect(navigation(page).getByRole('button', { name: '首页', exact: true })).toHaveAttribute('aria-current', 'page');
+      await page.screenshot({ path: testInfo.outputPath(`mobile-seek-home-390x${height}.png`) });
+    }
+
+    await navigation(page).getByRole('button', { name: '分类', exact: true }).tap();
+    await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
+    await page.getByRole('button', { name: new RegExp(clipTitle) }).first().tap();
+    await expect(navigation(page)).toHaveCount(0);
+    const contextBox = await mobileSliderBox(slider);
+    expect(contextBox.y + contextBox.height).toBeLessThanOrEqual(600 - 34);
+    await touchSeek(page, cdp, video, slider, contextBox, {
+      x: contextBox.x + contextBox.width * 0.75,
+      y: contextBox.y + contextBox.height / 2,
+    });
+    await expect(navigation(page)).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath('mobile-seek-context-390x600.png') });
+    await page.getByRole('button', { name: '返回', exact: true }).first().tap();
+    await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
+    await navigation(page).getByRole('button', { name: '首页', exact: true }).tap();
+    await expect(navigation(page).getByRole('button', { name: '首页', exact: true })).toHaveAttribute('aria-current', 'page');
+  } finally {
+    await cdp.detach();
+  }
 });
 
 test('平台登录退出和账号收藏隔离在同一浏览器中有效', async ({ page, request }) => {

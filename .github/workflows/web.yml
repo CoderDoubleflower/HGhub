@@ -29,6 +29,14 @@ jobs:
       - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
+      - name: Save mobile seek layout screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-seek-layout
+          path: test-results/**/mobile-seek-*.png
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Save browser failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
