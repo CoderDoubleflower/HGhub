@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, cover, fmt, fmtTime, mediaUrl, platform } from "../api";
+import { api, cover, fmt, fmtTime, isMobilePlatform, mediaUrl } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Avatar, Img, Sheet } from "./ui";
@@ -20,19 +20,22 @@ type Props = {
   mode: "home" | "context";
   kind?: "video" | "post";
   active: boolean;
+  /** Reserved bottom space, excluding the device's safe area. */
   bottomInset: number;
   onBack?: () => void;
   onNearEnd?: () => void;
 };
 
 const RATES = [1, 1.25, 1.5, 2];
+const MOBILE_SEEK_HEIGHT = 44;
+const withBottomSafeArea = (pixels: number) => `calc(var(--sab, 0px) + ${pixels}px)`;
 
 const stripHtml = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 
 export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd }: Props) {
   const store = useStore();
   const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen } = store;
-  const isDesktop = platform === "windows";
+  const isDesktop = !isMobilePlatform(store.platform);
 
   const boxRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<VideoHandle>(null);
@@ -40,6 +43,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const [epMap, setEpMap] = useState<Record<number, number>>({});
   const [details, setDetails] = useState<Record<number, Detail>>({});
   const [playUrls, setPlayUrls] = useState<Record<string, string>>({});
+  const [playbackAttempt, setPlaybackAttempt] = useState(0);
   const [cards, setCards] = useState<Record<number, VideoCard>>({});
   const [posts, setPosts] = useState<Record<number, Post>>({});
 
@@ -86,7 +90,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const scrubTarget = useRef<number | null>(null);
   /* 进度条拖动 */
   const barRef = useRef<HTMLDivElement>(null);
-  const barScrub = useRef(false);
+  const barPointer = useRef<number | null>(null);
   const [barPct, setBarPct] = useState<number | null>(null);
   const gesture = useRef<{
     x: number; y: number; startY: number; t: number; timer: number | null;
@@ -97,9 +101,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const detail = details[curId];
   const curEp = epMap[curId] || 1;
   const playKey = `${curId}:${curEp}`;
-  const playUrl = playUrls[playKey] || "";
   const episodes = detail?.episodes || [];
   const post = posts[curId];
+  const playUrl = kind === "post" ? post?.video_url || "" : playUrls[playKey] || "";
 
   /** 统一视图模型：短剧与吃瓜帖子共用同一套播放界面 */
   const meta = kind === "post"
@@ -132,14 +136,19 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   const posterUrl = cover(meta.cover, 900);
   const hasVideo = kind === "video" || !!post?.video_url;
-  const articleHtml = kind === "post" && !hasVideo ? sanitizeHtml(post?.content || "") : "";
+  const articleHtml = kind === "post" ? sanitizeHtml(post?.content || "") : "";
 
   /* 倍速：长按 / 锁定 → 2.0x，否则用基准倍速 */
   const effRate = holdSpeed || speedLock ? 2 : rate;
+  const canSeek = hasVideo && Number.isFinite(duration) && duration > 0;
   /* 进度条显示百分比（拖动时用拖动值） */
-  const barProgress = barPct ?? (duration ? time / duration : 0);
+  const barProgress = Math.max(0, Math.min(1, barPct ?? (canSeek ? time / duration : 0)));
+  const barTime = canSeek ? barProgress * duration : 0;
   /* 沉浸全屏 + 横屏视频 → 舞台旋转 90°，看起来就是横屏 */
   const rotated = !isDesktop && fs && vsize.w > vsize.h && vsize.h > 0;
+  // Keep the entire touch target above navigation; metadata and fullscreen sit above it.
+  const mobileSeekBottom = fs ? 52 : bottomInset + 4;
+  const mobileInfoBottom = mobileSeekBottom + MOBILE_SEEK_HEIGHT + 8;
 
   /* 滚动定位 */
   const onScroll = useCallback(() => {
@@ -171,6 +180,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   /* 拉详情（当前 + 邻接预取） */
   useEffect(() => {
+    if (kind !== "video") return;
     let alive = true;
     const need = [videoIds[index], videoIds[index + 1], videoIds[index - 1]].filter(Boolean);
     need.forEach((id) => {
@@ -179,7 +189,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, videoIds]);
+  }, [kind, index, videoIds]);
 
   /* 吃瓜帖子：直接拿帖子详情（含 video_url） */
   useEffect(() => {
@@ -195,7 +205,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   /* 拉播放地址 */
   useEffect(() => {
-    if (!curId) return;
+    if (!curId || kind !== "video") return;
     if (playUrls[playKey]) return;
     let alive = true;
     api.play(curId, curEp)
@@ -208,7 +218,27 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       .catch((e) => { if (alive) setErr((e as Error).message || "取播放地址失败"); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [curId, curEp]);
+  }, [kind, curId, curEp]);
+
+  const retryPlayback = async () => {
+    setErr("");
+    setWaiting(true);
+    try {
+      if (kind === "post") {
+        const latest = await api.post(curId);
+        if (!latest.video_url) throw new Error("暂无播放地址");
+        setPosts((previous) => ({ ...previous, [curId]: latest }));
+      } else {
+        const latest = await api.play(curId, curEp);
+        if (!latest.video_url) throw new Error("暂无播放地址");
+        setPlayUrls((previous) => ({ ...previous, [playKey]: latest.video_url }));
+      }
+      setPlaybackAttempt((value) => value + 1);
+    } catch (error) {
+      setWaiting(false);
+      setErr((error as Error).message || "取播放地址失败");
+    }
+  };
 
   /* 切换条目/集数时重置播放状态 */
   useEffect(() => {
@@ -269,8 +299,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const toggleFull = () => {
     const el = boxRef.current?.parentElement;
     if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else el.requestFullscreen().catch(() => {});
+    if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+    else if (el.requestFullscreen) el.requestFullscreen().catch(() => toast("此浏览器暂时无法全屏", "info"));
+    else {
+      const video = videoRef.current?.el() as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
+      if (video?.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      else toast("此浏览器暂时无法全屏", "info");
+    }
   };
 
   /* —— 长按 2x（上滑锁定） / 横拖定位 / 单击暂停 —— */
@@ -386,28 +421,70 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     setBarPct(pct);
     return pct;
   };
+  const clearBarScrub = useCallback(() => {
+    const pointerId = barPointer.current;
+    if (pointerId === null) return;
+    barPointer.current = null;
+    setBarPct(null);
+    const el = barRef.current;
+    try { if (el?.hasPointerCapture(pointerId)) el.releasePointerCapture(pointerId); } catch { /* already released */ }
+  }, []);
+
+  // A different episode, page or orientation must not inherit an unfinished drag.
+  useEffect(() => {
+    clearBarScrub();
+    return clearBarScrub;
+  }, [active, playKey, fs, rotated, clearBarScrub]);
+
   const onBarDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!active || !canSeek || !e.isPrimary || e.button !== 0 || barPointer.current !== null) return;
+    // touch-action and capture handle touch dragging while preserving native defaults.
+    if (e.pointerType === "mouse") e.preventDefault();
     e.stopPropagation();
-    barScrub.current = true;
-    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    barPointer.current = e.pointerId;
+    if (e.pointerType === "mouse") e.currentTarget.focus({ preventScroll: true });
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     barSeekTo(e.clientX, e.clientY);
   };
   const onBarMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!barScrub.current) return;
+    if (barPointer.current !== e.pointerId) return;
+    if (e.pointerType === "mouse") e.preventDefault();
     e.stopPropagation();
     barSeekTo(e.clientX, e.clientY);
   };
   const onBarUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!barScrub.current) return;
-    barScrub.current = false;
+    if (barPointer.current !== e.pointerId) return;
+    if (e.pointerType === "mouse") e.preventDefault();
     e.stopPropagation();
     const pct = barPctAt(e.clientX, e.clientY);
-    if (pct != null && duration) {
+    clearBarScrub();
+    if (pct != null && canSeek) {
       const target = pct * duration;
       videoRef.current?.seek(target);
       setTime(target);
     }
-    setBarPct(null);
+  };
+  const onBarCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (barPointer.current !== e.pointerId) return;
+    e.stopPropagation();
+    clearBarScrub();
+  };
+  const onBarKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    let target: number;
+    switch (e.key) {
+      case "ArrowLeft": case "ArrowDown": target = barTime - 5; break;
+      case "ArrowRight": case "ArrowUp": target = barTime + 5; break;
+      case "Home": target = 0; break;
+      case "End": target = duration; break;
+      default: return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (!active || !canSeek) return;
+    clearBarScrub();
+    target = Math.max(0, Math.min(duration, target));
+    videoRef.current?.seek(target);
+    setTime(target);
   };
 
   const togglePip = async () => {
@@ -477,14 +554,14 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               {isActive && playUrl ? (
                 <div className="absolute inset-0" style={{ touchAction: "pan-y" }}
                   onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
-                <VideoSurface ref={videoRef} src={playUrl} poster={posterUrl} autoPlay muted={muted}
+                <VideoSurface key={`${playKey}:${playbackAttempt}`} ref={videoRef} src={playUrl} poster={posterUrl} autoPlay={active} muted={muted}
                   volume={volume} rate={effRate}
                   fit={isDesktop || (vsize.w > 0 && vsize.w > vsize.h) ? "contain" : "cover"}
                   onClick={() => { if (isDesktop) videoRef.current?.toggle(); }}
                   onTime={setTime}
                   onDuration={setDuration}
                   onSize={(w, h) => setVsize({ w, h })}
-                  onPlaying={() => { setPaused(false); setWaiting(false); }}
+                  onPlaying={() => { setPaused(false); setWaiting(false); setErr(""); }}
                   onPause={() => setPaused(true)}
                   onWaiting={() => setWaiting(true)}
                   onEnded={() => { const next = episodes.find((e) => e.ep_num === curEp + 1); if (next) pickEp(next.ep_num); }}
@@ -521,7 +598,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                   </div>
                 ) : (
                   <div className="absolute inset-x-0 z-20 flex items-center gap-2 px-2.5" style={{ top: "calc(var(--sat, 0px) + 8px)" }}>
-                    <button onClick={onBack} className="w-9 h-9 rounded-full bg-black/45 flex items-center justify-center text-white pressable elev-1"><IBack size={20} /></button>
+                    <button onClick={onBack} aria-label="返回" className="w-9 h-9 rounded-full bg-black/45 flex items-center justify-center text-white pressable elev-1"><IBack size={20} /></button>
                     <span className="text-[14.5px] font-semibold text-white tsh truncate">{title}</span>
                     <span className="ml-auto px-2 py-0.5 rounded-full bg-black/45 text-[11px] font-semibold text-white/80">{index + 1} / {videoIds.length}</span>
                     <button onClick={() => setMuted((m) => !m)} className="w-9 h-9 rounded-full bg-black/45 flex items-center justify-center text-white pressable elev-1">
@@ -534,7 +611,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               {/* 右侧操作栏 */}
               {!fs && (
               <div className={`absolute z-20 flex flex-col items-center ${isDesktop ? "desktop-social" : "right-3"}`}
-                style={isDesktop ? undefined : { bottom: `calc(var(--sab, 0px) + ${bottomInset + 104}px)` }}>
+                style={isDesktop ? undefined : { bottom: withBottomSafeArea(mobileInfoBottom + 48) }}>
                 {isDesktop && (
                   <div className="desktop-browse-inline">
                     <button onClick={() => go(-1)} disabled={index === 0} aria-label="上一个" title="上一个 ↑">
@@ -594,10 +671,10 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               </div>
               )}
 
-              {/* 左下信息：整体下移紧贴进度条，去掉标签/评分行避免挤占画面 */}
+              {/* 左下信息：留在进度条触摸区域上方，保证简介可点击 */}
               {!fs && (
               <div className={isDesktop ? "desktop-video-meta" : "absolute left-3.5 right-[76px] z-20"}
-                style={isDesktop ? undefined : { bottom: `calc(var(--sab, 0px) + ${bottomInset + 22}px)` }}>
+                style={isDesktop ? undefined : { bottom: withBottomSafeArea(mobileInfoBottom) }}>
                 <div className="flex items-center gap-2">
                   <span className="text-[15px] font-bold text-white tsh truncate">@{meta.author}</span>
                   {episodes.length > 0 && (
@@ -650,7 +727,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                   <div className="bg-black/70 rounded-xl p-5 flex flex-col items-center gap-3 text-[13px] text-white/90">
                     <span>视频暂时无法加载</span>
                     <span className="text-[10.5px] text-white/45 max-w-[240px] text-center break-all">{err}</span>
-                    <button className="text-primary text-[12.5px]" onClick={() => { setErr(""); setWaiting(true); videoRef.current?.play(); }}>重试</button>
+                    <button className="text-primary text-[12.5px] min-h-11 px-4" onClick={retryPlayback}>重试</button>
                   </div>
                 </div>
               )}
@@ -705,12 +782,17 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
         </div>
       )}
 
-      {/* 移动端进度条：22px 热区，可拖动 */}
+      {/* 移动端进度条：44px 热区，独立于导航和简介 */}
       {!isDesktop && (
-        <div ref={barRef} className="absolute inset-x-0 z-30"
-          style={{ bottom: fs ? "calc(var(--sab, 0px) + 52px)" : bottomInset - 2, height: 22, touchAction: "none" }}
-          onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp} onPointerCancel={onBarUp}>
-          <div className={`absolute inset-x-0 bottom-[6px] transition-all duration-150 ${barPct !== null || fs ? "h-[5px]" : "h-[2.5px]"} bg-white/20`}>
+        <div ref={barRef} role="slider" aria-label="播放进度" aria-orientation={rotated ? "vertical" : "horizontal"}
+          aria-valuemin={0} aria-valuemax={canSeek ? duration : 0} aria-valuenow={barTime}
+          aria-valuetext={`${fmtTime(barTime)} / ${fmtTime(canSeek ? duration : 0)}`} aria-disabled={!canSeek}
+          tabIndex={active && canSeek ? 0 : -1}
+          className="absolute inset-x-3.5 z-30 select-none cursor-pointer focus-visible:outline-2 focus-visible:outline-white/80 focus-visible:-outline-offset-2"
+          style={{ bottom: withBottomSafeArea(mobileSeekBottom), height: MOBILE_SEEK_HEIGHT, touchAction: "none" }}
+          onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp}
+          onPointerCancel={onBarCancel} onLostPointerCapture={onBarCancel} onKeyDown={onBarKeyDown}>
+          <div className={`absolute inset-x-0 top-1/2 -translate-y-1/2 pointer-events-none transition-all duration-150 ${barPct !== null || fs ? "h-[5px]" : "h-[2.5px]"} bg-white/20`}>
             <div className="h-full relative"
               style={{ width: `${barProgress * 100}%`, background: barPct !== null ? "var(--p-primary)" : "rgba(255,255,255,.92)", transition: barPct !== null ? "none" : "width .25s linear" }}>
               <span className="absolute right-[-5px] top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full bg-white elev-1"
@@ -718,7 +800,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
             </div>
           </div>
           {barPct !== null && (
-            <div className="absolute left-1/2 -translate-x-1/2 bottom-7 px-3.5 py-1.5 rounded-lg bg-black/70 backdrop-blur-md text-[15px] font-bold text-white tabular-nums">
+            <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1 px-3.5 py-1.5 rounded-lg bg-black/70 backdrop-blur-md text-[15px] font-bold text-white tabular-nums pointer-events-none">
               {fmtTime(barPct * (duration || 0))} <span className="text-white/45 text-[12px] font-medium">/ {fmtTime(duration)}</span>
             </div>
           )}
@@ -729,7 +811,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       {!isDesktop && !fs && (
         <button onClick={() => setFs(true)} aria-label="全屏"
           className="absolute right-4 z-20 w-9 h-9 rounded-full bg-black/45 flex items-center justify-center text-white/90 pressable elev-1"
-          style={{ bottom: bottomInset + 56 }}>
+          style={{ bottom: withBottomSafeArea(mobileInfoBottom) }}>
           <IExpand size={17} />
         </button>
       )}
@@ -772,17 +854,21 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               <EpisodesPanel videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
             ) : panel === "comments" ? (
               <CommentsPanel videoId={curId} ep={curEp} total={meta.comment} kind={kind} onClose={() => setPanel(null)} />
+            ) : panel === "article" ? (
+              <ArticlePanel title={meta.title} html={articleHtml} cover={posterUrl} hot={post?.hot} onClose={() => setPanel(null)} />
             ) : null}
           </div>
         </div>
       ) : (
         <Sheet open={panel !== null} onClose={() => setPanel(null)}>
-          <div className="flex flex-col h-full" style={{ height: "72vh" }}>
+          <div className="flex flex-col h-full" style={{ height: "72dvh" }}>
             {panel === "episodes" ? (
               <EpisodesPanel videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
-            ) : (
+            ) : panel === "article" ? (
+              <ArticlePanel title={meta.title} html={articleHtml} cover={posterUrl} hot={post?.hot} onClose={() => setPanel(null)} />
+            ) : panel === "comments" ? (
               <CommentsPanel videoId={curId} ep={curEp} total={meta.comment} kind={kind} onClose={() => setPanel(null)} />
-            )}
+            ) : null}
           </div>
         </Sheet>
       )}

@@ -1,0 +1,149 @@
+name: Web and Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HGHUB_NODE_IMAGE: public.ecr.aws/docker/library/node:24-alpine
+  HGHUB_INIT_IMAGE: public.ecr.aws/docker/library/alpine:3.22
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:browser
+      - name: Save mobile seek layout screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-seek-layout
+          path: test-results/**/mobile-seek-*.png
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Save browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Validate and pull ECR Public images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose config --format json \
+            | jq -e --arg node "$HGHUB_NODE_IMAGE" --arg init "$HGHUB_INIT_IMAGE" \
+              '.services.hghub.build.args.NODE_IMAGE == $node and .services["data-init"].image == $init'
+          docker pull "$HGHUB_NODE_IMAGE"
+          docker pull "$HGHUB_INIT_IMAGE"
+      - name: Build Compose image from ECR Public
+        run: docker compose build hghub
+      - name: Smoke-test optional password login
+        shell: bash
+        run: |
+          set -euo pipefail
+          cookie_jar="$RUNNER_TEMP/hghub-password.cookies"
+          trap 'docker logs hghub-test; docker rm -fv hghub-test; rm -f "$cookie_jar"' EXIT
+          docker run -d --name hghub-test --read-only --tmpfs /tmp \
+            -e HGHUB_AUTH_DISABLED=false \
+            -e HGHUB_ADMIN_PASSWORD=ci-fixture-password-only \
+            -e HGHUB_UPSTREAM_BASE=https://upstream.fixture.invalid \
+            -p 127.0.0.1:3000:3000 hghub-web:local
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:3000/healthz; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3000/healthz
+          curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3000/api/auth/session \
+            | jq -e '.authenticated == false and .loginRequired == true'
+          test "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/settings)" = 401
+          curl --fail --silent --show-error --max-time 5 -c "$cookie_jar" \
+            -H 'Origin: http://127.0.0.1:3000' -H 'X-HGhub-Request: 1' \
+            -H 'Content-Type: application/json' \
+            --data '{"username":"admin","password":"ci-fixture-password-only"}' \
+            http://127.0.0.1:3000/api/auth/login \
+            | jq -e '.authenticated == true and .loginRequired == true'
+          curl --fail --silent --show-error --max-time 5 -b "$cookie_jar" http://127.0.0.1:3000/api/settings \
+            | jq -e '.proxyUrl == "" and .proxyConfigured == false'
+      - name: Verify Linux host networking and local data persistence
+        shell: bash
+        env:
+          COMPOSE_PROJECT_NAME: hghub-ci
+          HGHUB_HOST: 127.0.0.1
+          HGHUB_PORT: "3001"
+          HGHUB_PROXY: ""
+          HGHUB_UPSTREAM_BASE: https://upstream.fixture.invalid
+        run: |
+          set -euo pipefail
+          # A clean checkout has no data directory: Docker must create it, then data-init must fix its ownership.
+          test ! -e ./data
+          cleanup() {
+            local result=$?
+            docker compose logs --no-color || true
+            docker compose down --remove-orphans || true
+            sudo rm -rf -- ./data
+            exit "$result"
+          }
+          trap cleanup EXIT
+          wait_for_health() {
+            for attempt in $(seq 1 60); do
+              if [ "$(docker inspect --format '{{.State.Health.Status}}' "$1")" = healthy ]; then return 0; fi
+              sleep 1
+            done
+            return 1
+          }
+          docker compose up -d --no-build
+          container_id=$(docker compose ps -q hghub)
+          wait_for_health "$container_id"
+          docker inspect "$container_id" | jq -e '.[0] | .HostConfig.NetworkMode == "host"
+            and ((.HostConfig.PortBindings // {}) | length) == 0 and .HostConfig.ReadonlyRootfs == true
+            and (.Config.Env | index("HGHUB_AUTH_DISABLED=true")) != null
+            and all(.Config.Env[]; startswith("HGHUB_ADMIN_PASSWORD=") | not)'
+          docker inspect "$container_id" | jq -e --arg source "$PWD/data" '.[0].Mounts
+            | any(.Type == "bind" and .Source == $source and .Destination == "/app/data" and .RW == true)'
+          docker inspect "$(docker compose ps -aq data-init)" | jq -e --arg image "$HGHUB_INIT_IMAGE" '.[0]
+            | .Config.Image == $image and .State.Status == "exited" and .State.ExitCode == 0
+            and .HostConfig.NetworkMode == "none"'
+          test "$(docker compose exec -T hghub id -u)" = 1000
+          test "$(sudo stat -c '%u:%g %a' ./data)" = '1000:1000 700'
+          base_url="http://127.0.0.1:$HGHUB_PORT"
+          curl --fail --silent --show-error --max-time 5 "$base_url/api/auth/session" \
+            | jq -e '.authenticated == true and .loginRequired == false'
+          curl --fail --silent --show-error --max-time 5 "$base_url/api/settings" \
+            | jq -e '.proxySource == "direct"'
+          # No login, password, or cookie jar is used. Saving an empty proxy performs no upstream request.
+          curl --fail --silent --show-error --max-time 5 -X PUT \
+            -H "Origin: $base_url" -H 'X-HGhub-Request: 1' -H 'Content-Type: application/json' \
+            --data '{"proxyUrl":""}' "$base_url/api/settings" \
+            | jq -e '.proxyUrl == "" and .proxyConfigured == false and .proxySource == "saved"'
+          sudo test -f ./data/settings.json
+          sudo cat ./data/settings.json | jq -e '.proxyUrl == ""'
+          test "$(sudo stat -c '%u:%g %a' ./data/settings.json)" = '1000:1000 600'
+          saved_checksum=$(sudo sha256sum ./data/settings.json)
+          docker compose up -d --no-deps --no-build --force-recreate hghub
+          recreated_id=$(docker compose ps -q hghub)
+          test "$recreated_id" != "$container_id"
+          wait_for_health "$recreated_id"
+          curl --fail --silent --show-error --max-time 5 "$base_url/api/auth/session" \
+            | jq -e '.authenticated == true and .loginRequired == false'
+          curl --fail --silent --show-error --max-time 5 "$base_url/api/settings" \
+            | jq -e '.proxyUrl == "" and .proxyConfigured == false and .proxySource == "saved"'
+          test "$(sudo sha256sum ./data/settings.json)" = "$saved_checksum"

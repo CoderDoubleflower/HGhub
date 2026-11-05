@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { api, APP_VERSION, cover, fmt, logLine, platform } from "../api";
+import { api, APP_VERSION, fmt, isNative, logLine } from "../api";
 import type { Detail, User } from "../types";
 import { useStore } from "../store";
 import { Avatar, Empty, Img, Modal, Toggle } from "../components/ui";
+import NetworkSettings from "../components/NetworkSettings";
 import { IBroom, IChevR, IClock, IHeart, IInfo, ILink, ILogout, IMoon, IStar, ISun, IUser, IUserF } from "../icons";
 
 export default function Profile({ wide }: { wide: boolean }) {
-  const { user, setUser, loginOpen, setLoginOpen, logout, theme, setTheme, history, favs, clearHistory, clearLocal, push, toast } = useStore();
+  const { user, setUser, setLoginOpen, logout, theme, setTheme, history, favs, clearHistory, clearLocal, push, toast, platform } = useStore();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -36,6 +37,7 @@ export default function Profile({ wide }: { wide: boolean }) {
   }, [ids.join(",")]);
 
   const submit = async () => {
+    if (busy) return;
     if (!username.trim() || !password) { setErr("请输入账号与密码"); return; }
     setBusy(true);
     setErr("");
@@ -60,16 +62,16 @@ export default function Profile({ wide }: { wide: boolean }) {
       <div className="absolute inset-0 bg-bg flex flex-col">
         <div className="shrink-0 px-4 pb-1" style={{ paddingTop: "calc(var(--sat, 0px) + 14px)" }}>
           <div className="text-[24px] font-bold text-on leading-none">我的</div>
-          <div className="text-[11px] text-mut mt-1.5">登录后可同步点赞、收藏与评论</div>
+          <div className="text-[12px] text-mut mt-1.5">登录平台账号后，可使用平台的互动功能</div>
         </div>
 
-        <div className="flex-1 scroll-y px-4 pt-3 pb-24">
+        <div className="flex-1 scroll-y px-4 pt-3 pb-24 w-full max-w-[700px] mx-auto">
           <div className="rounded-(--r-lg) bg-s1 p-5 elev-1 a-rise">
             <div className="flex items-center gap-3">
               <Avatar size={52} icon={<IUser size={24} />} hue={220} />
               <div className="flex-1">
-                <div className="text-[15px] font-bold text-on">{mode === "login" ? "登录 HGhub" : "注册 HGhub"}</div>
-                <div className="text-[10.5px] text-mut mt-0.5">{mode === "login" ? "账号密码登录，与官网同源" : "注册后可在多端同步"}</div>
+                <div className="text-[15px] font-bold text-on">{mode === "login" ? "登录平台账号" : "注册平台账号"}</div>
+                <div className="text-[11px] text-mut mt-0.5">使用原平台账号与密码</div>
               </div>
             </div>
 
@@ -81,16 +83,16 @@ export default function Profile({ wide }: { wide: boolean }) {
             </div>
 
             <div className="mt-3.5 flex flex-col gap-2.5">
-              <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="账号（4-20 位字母/数字/下划线）"
+              <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="平台账号" aria-label="平台账号" autoComplete="username" autoCapitalize="none" spellCheck={false} maxLength={128}
                 className="h-10 px-3.5 rounded-(--r-sm) bg-s3 text-[13px] text-on placeholder-dim outline-none focus:bg-s4" />
-              <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="密码（6-20 位）"
+              <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="平台密码" aria-label="平台密码" autoComplete={mode === "login" ? "current-password" : "new-password"} maxLength={1024}
                 onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
                 className="h-10 px-3.5 rounded-(--r-sm) bg-s3 text-[13px] text-on placeholder-dim outline-none focus:bg-s4" />
               {mode === "register" && (
-                <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱（可选）"
+                <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="邮箱（可选）" aria-label="邮箱（可选）" autoComplete="email" maxLength={254}
                   className="h-10 px-3.5 rounded-(--r-sm) bg-s3 text-[13px] text-on placeholder-dim outline-none focus:bg-s4" />
               )}
-              {err && <div className="text-[11.5px] text-danger">{err}</div>}
+              {err && <div role="alert" className="text-[12px] text-danger">{err}</div>}
               <button onClick={submit} disabled={busy}
                 className="h-10 rounded-(--r-ctl) bg-primary text-on-primary text-[13px] font-bold pressable disabled:opacity-60">
                 {busy ? "处理中…" : mode === "login" ? "登录" : "注册并登录"}
@@ -98,14 +100,15 @@ export default function Profile({ wide }: { wide: boolean }) {
             </div>
           </div>
 
-          <div className="mt-5 rounded-(--r-md) bg-s2 p-4">
+          {!isNative && <NetworkSettings />}
+          {isNative && <div className="mt-5 rounded-(--r-md) bg-s2 p-4">
             <div className="flex items-center gap-2 text-[12.5px] font-semibold text-on"><IUserF size={15} className="text-primary" />登录能做什么</div>
             <ul className="mt-2.5 space-y-1.5 text-[11.5px] text-mut leading-relaxed">
               <li>· 点赞 / 收藏与官网账号同步</li>
               <li>· 按剧集记录观看进度</li>
               <li>· 发表评论与回复</li>
             </ul>
-          </div>
+          </div>}
         </div>
       </div>
     );
@@ -118,7 +121,7 @@ export default function Profile({ wide }: { wide: boolean }) {
         <div className="text-[24px] font-bold text-on leading-none">我的</div>
       </div>
 
-      <div className="flex-1 scroll-y px-4 pt-2 pb-24">
+      <div className="flex-1 scroll-y px-4 pt-2 pb-24 w-full max-w-[900px] mx-auto">
         {/* 资料卡 */}
         <div className="rounded-(--r-lg) bg-s1 p-4 elev-1 flex items-center gap-3.5 a-rise">
           <Avatar size={56} name={user.nickname} hue={280} ring />
@@ -132,10 +135,12 @@ export default function Profile({ wide }: { wide: boolean }) {
             </div>
           </div>
           <button onClick={async () => { await logout(); }}
-            className="w-9 h-9 rounded-full bg-s3 flex items-center justify-center text-mut pressable" aria-label="退出登录">
+            className="w-11 h-11 rounded-full bg-s3 flex items-center justify-center text-mut pressable" aria-label="退出平台账号">
             <ILogout size={17} />
           </button>
         </div>
+
+        {!isNative && <NetworkSettings />}
 
         {/* 我的内容 */}
         <div className="flex bg-s3 rounded-(--r-ctl) p-1 mt-4">
@@ -178,7 +183,7 @@ export default function Profile({ wide }: { wide: boolean }) {
             <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary">{theme === "dark" ? <IMoon size={16} /> : <ISun size={16} />}</span>
             <div className="flex-1">
               <div className="text-[12.5px] text-on">深色外观</div>
-              <div className="text-[10.5px] text-mut">跟随设计稿的 Fluent 深色</div>
+              <div className="text-[10.5px] text-mut">切换深色与浅色界面</div>
             </div>
             <Toggle on={theme === "dark"} onChange={(on) => setTheme(on ? "dark" : "light")} label="深色外观" />
           </div>
@@ -210,7 +215,7 @@ export default function Profile({ wide }: { wide: boolean }) {
             <IChevR size={15} className="text-mut" />
           </button>
           {/* 打不开时先点这里：把 DNS / 代理 / HTTP 结果复制给维护者 */}
-          <button onClick={async () => {
+          {isNative && <button onClick={async () => {
             try {
               const text = JSON.stringify(await api.netDiag(), null, 2);
               logLine(`[net_diag] ${text}`);
@@ -226,10 +231,10 @@ export default function Profile({ wide }: { wide: boolean }) {
               <div className="text-[10.5px] text-mut">检测 DNS / 系统代理 / 官网连通性</div>
             </div>
             <IChevR size={15} className="text-mut" />
-          </button>
+          </button>}
         </div>
 
-        <div className="text-center text-[10px] text-dim mt-5">HGhub {APP_VERSION} · {platform === "android" ? "Android" : "Windows"} 客户端</div>
+        <div className="text-center text-[10px] text-dim mt-5">HGhub {APP_VERSION} · {isNative ? (platform === "android" ? "Android" : "Windows") : "Web"}</div>
 
         <Modal open={about} onClose={() => setAbout(false)} width={392}>
           <div className="p-5">
@@ -242,8 +247,8 @@ export default function Profile({ wide }: { wide: boolean }) {
             </div>
 
             <p className="text-[12px] text-on/70 leading-relaxed mt-4">
-              基于 Rust + Tauri 2 构建的跨平台客户端，支持 Windows 与 Android。
-              界面遵循 Fluent 设计语言，播放器采用沉浸式竖屏信息流。
+              {isNative ? "基于 Rust + Tauri 2 构建的跨平台客户端，支持 Windows 与 Android。" : "支持 Docker 部署的网页版本，可在手机、平板和电脑浏览器中访问。"}
+              播放器采用沉浸式竖屏信息流。
             </p>
 
             <div className="mt-4 rounded-(--r-sm) bg-s3/60 p-3 text-[11px] text-mut leading-relaxed">

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore, type Tab } from "../store";
-import { APP_VERSION } from "../api";
+import { APP_VERSION, isNative } from "../api";
 import { Avatar } from "./ui";
 import {
   IClose, IGrid, IGridF, IHome, IHomeF, IMinus, IMoon, IRestore, ISearch, ISidebar,
@@ -84,11 +84,11 @@ export function WindowsRail({ collapsed }: { collapsed: boolean }) {
           <button className="win-account" onClick={() => { setTab("profile"); if (!user) setLoginOpen(true); }}>
             <Avatar size={34} hue={220} name={user?.nickname} icon={user ? undefined : <IUser size={17} />} />
             <span className="win-account-copy">
-              <strong>{user?.nickname || "登录 HGhub"}</strong>
+              <strong>{user?.nickname || "登录平台账号"}</strong>
               <small>{user ? "你的精彩，都在这里" : "留住每一次心动"}</small>
             </span>
           </button>
-          <span className="win-sidebar-version">HGhub for Windows {APP_VERSION}</span>
+          <span className="win-sidebar-version">HGhub {isNative ? "for Windows" : "Web"} {APP_VERSION}</span>
         </div>
       </div>
     </nav>

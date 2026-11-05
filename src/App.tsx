@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, type Page, type Tab } from "./store";
-import { selfTest, mediaPlaybackProbe } from "./api";
+import { isMobilePlatform, isNative } from "./api";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
 import { runBack } from "./back";
 import Home from "./pages/Home";
@@ -13,7 +13,10 @@ import LoginModal from "./components/LoginModal";
 import { ToastHost } from "./components/ui";
 import { WindowsRail, WindowsTitleBar } from "./components/WindowsChrome";
 import ResizeHandles from "./components/ResizeHandles";
-import { IGrid, IGridF, IHome, IHomeF, ISearch, IUser, IUserF, Logo } from "./icons";
+import { IMoon, ISearch, ISidebar, ISun, Logo } from "./icons";
+
+// The player reserves this exact height; the bottom safe area is added separately.
+const MOBILE_TAB_BAR_HEIGHT = 42;
 
 /* ============ 底部标签栏（Android）—— 细瘦纯文字、低侵入 ============ */
 function TabBar() {
@@ -26,13 +29,13 @@ function TabBar() {
   ];
   const onVideo = tab === "home";
   return (
-    <nav className={`absolute bottom-0 inset-x-0 z-30 ${onVideo ? "" : "bg-s2/95 elev-up"}`}
+    <nav className={`absolute bottom-0 inset-x-0 z-30 ${onVideo ? "" : "bg-s2/95 elev-up"}`} aria-label="主导航"
       style={{ paddingBottom: "var(--sab, 0px)" }}>
-      <div className="h-[42px] flex items-center px-1">
+      <div className="flex items-center px-1" style={{ height: MOBILE_TAB_BAR_HEIGHT }}>
         {items.map(({ k, label }) => {
           const on = tab === k;
           return (
-            <button key={k} onClick={() => setTab(k)} className="flex-1 h-full flex flex-col items-center justify-center pressable">
+            <button key={k} onClick={() => setTab(k)} aria-current={on ? "page" : undefined} className="flex-1 h-full flex flex-col items-center justify-center pressable">
               <span className={`text-[13px] leading-none transition-colors duration-200 ${on
                 ? (onVideo ? "font-bold text-white" : "font-bold text-on")
                 : (onVideo ? "font-normal text-white/55" : "font-normal text-mut")}`}
@@ -69,8 +72,7 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
 function AppBody() {
   const { platform, tab, setTab, stack, pop, loginOpen, setLoginOpen, fs } = useStore();
   const mainRef = useRef<HTMLDivElement>(null);
-  const [wide, setWide] = useState(platform === "windows");
-  const [collapsed, setCollapsed] = useState(false);
+  const [wide, setWide] = useState(!isMobilePlatform(platform));
 
   useLayoutEffect(() => {
     const el = mainRef.current;
@@ -102,14 +104,13 @@ function AppBody() {
 
   const vis = (k: Tab) => (tab === k ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none");
   const pageActive = stack.length === 0 && !loginOpen;
-  const bottomInset = platform === "android" ? (fs ? 0 : 48) : 14;
+  const bottomInset = fs ? 0 : MOBILE_TAB_BAR_HEIGHT;
   /* 栈页（从搜索/分类/我的进入的播放页、图文页）不显示底栏：
      底栏会盖住评论抽屉的输入框，且这些页面本身是沉浸的 */
-  const stackInset = platform === "android" ? (fs ? 0 : 20) : 14;
+  const stackInset = fs ? 0 : 20;
 
   return (
-    <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
-      {platform === "windows" && <WindowsRail collapsed={collapsed} />}
+    <div className={`absolute inset-0 flex bg-canvas plat-android plat-${platform}`}>
       <div ref={mainRef} className="relative flex-1 min-w-0 overflow-hidden win-main">
         <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={bottomInset} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
@@ -122,7 +123,7 @@ function AppBody() {
           </div>
         ))}
 
-        {platform === "android" && !fs && stack.length === 0 && <TabBar />}
+        {!fs && stack.length === 0 && <TabBar />}
       </div>
     </div>
   );
@@ -139,6 +140,24 @@ function DesktopShell() {
         <ShellInner collapsed={collapsed || theater} theater={theater} />
       </div>
       <ResizeHandles />
+    </div>
+  );
+}
+
+/** The browser keeps navigation and appearance controls without native window buttons. */
+function BrowserDesktopShell() {
+  const [collapsed, setCollapsed] = useState(false);
+  const { theater, theme, setTheme, setTab } = useStore();
+  return (
+    <div className="absolute inset-0 flex flex-col bg-canvas win-root">
+      <header className="web-header">
+        <div className="flex items-center gap-2.5 font-semibold text-[17px]"><Logo size={25} />HGhub</div>
+        <button onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "展开侧栏" : "收起侧栏"} className="rounded-(--r-sm) hover:bg-s3"><ISidebar size={18} /></button>
+        <div className="flex-1" />
+        <button onClick={() => setTab("search")} aria-label="搜索" className="rounded-(--r-sm) hover:bg-s3"><ISearch size={19} /></button>
+        <button onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="切换外观" className="rounded-(--r-sm) hover:bg-s3">{theme === "dark" ? <ISun size={18} /> : <IMoon size={18} />}</button>
+      </header>
+      <div className="relative flex-1 min-h-0"><ShellInner collapsed={collapsed || theater} theater={theater} /></div>
     </div>
   );
 }
@@ -223,11 +242,11 @@ export default function App() {
     if (loginOpen) { setLoginOpen(false); return; }
     if (stack.length) { pop(); return; }
     if (tab !== "home") { setTab("home"); return; }
-    invoke("plugin:app|exit", { code: 0 }).catch(() => {});
+    if (isNative) invoke("plugin:app|exit", { code: 0 }).catch(() => {});
   };
 
   useEffect(() => {
-    if (platform !== "android") return undefined;
+    if (!isNative || platform !== "android") return undefined;
     let disposed = false;
     let handle: { unregister: () => Promise<void> } | null = null;
     addPluginListener("app", "back-button", () => backRef.current())
@@ -240,22 +259,15 @@ export default function App() {
   }, [platform]);
 
   useEffect(() => {
+    if (!isNative) return;
     const prevent = (e: Event) => e.preventDefault();
     document.addEventListener("contextmenu", prevent);
     return () => document.removeEventListener("contextmenu", prevent);
   }, []);
 
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const t = window.setTimeout(() => {
-      selfTest().then((r) => { invoke("debug_log", { msg: r }).catch(() => {}); }).catch(() => {});
-    }, 2500);
-    return () => window.clearTimeout(t);
-  }, []);
-
   return (
     <>
-      {platform === "windows" ? <DesktopShell /> : <MobileShell />}
+      {isMobilePlatform(platform) ? <MobileShell /> : isNative ? <DesktopShell /> : <BrowserDesktopShell />}
       <LoginModal />
       <ToastHost />
       {/* 登录遮罩键盘处理占位 */}

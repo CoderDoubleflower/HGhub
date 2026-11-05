@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { readFileSync } from "node:fs";
 
 const host = process.env.TAURI_DEV_HOST;
+const webServer = process.env.HGHUB_DEV_SERVER || "http://127.0.0.1:3000";
 const { version } = JSON.parse(
   readFileSync(new URL("./package.json", import.meta.url), "utf8"),
 ) as { version: string };
@@ -21,6 +22,10 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
+    proxy: {
+      "/api": { target: webServer, changeOrigin: false },
+      "/media": { target: webServer, changeOrigin: false },
+    },
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],
   build: {

@@ -89,6 +89,8 @@ html.theme-light {
 }
 
 html, body, #root { height: 100%; overflow: hidden; overscroll-behavior: none; }
+#root { position: relative; }
+.web-host, .web-host body, .web-host #root { height: 100dvh; }
 body {
   margin: 0;
   background: var(--p-canvas);
@@ -101,6 +103,29 @@ body {
 input, textarea { user-select: text; }
 img, video { -webkit-user-drag: none; }
 button { cursor: pointer; font-family: inherit; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--p-primary); outline-offset: 3px; }
+.web-field {
+  display: block; width: 100%; min-height: 46px; padding: 11px 13px;
+  border: 1px solid transparent; border-radius: var(--r-sm); outline: none;
+  background: var(--p-s3); color: var(--p-on); font: inherit; font-size: 16px;
+  user-select: text;
+}
+.web-field:focus { border-color: var(--p-primary); background: var(--p-s4); }
+.web-field::placeholder { color: var(--p-dim); font-size: 13px; }
+.site-access {
+  position: absolute; inset: 0; overflow-y: auto; display: grid; align-items: center;
+  background: var(--p-canvas); padding: max(env(safe-area-inset-top), 32px) 24px max(env(safe-area-inset-bottom), 32px);
+}
+.site-access-content { width: 100%; max-width: 380px; margin: auto; }
+.web-header { min-height: 54px; display: flex; align-items: center; gap: 16px; padding: 0 18px; }
+.web-header button { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+@media (max-width: 767px) {
+  .web-host input:not([type="range"]), .web-host textarea { font-size: 16px; }
+}
+@media (hover: hover) and (pointer: fine) {
+  .inline-player-controls { opacity: 0; }
+  .group:hover .inline-player-controls, .group:focus-within .inline-player-controls { opacity: 1; }
+}
 
 /* ——— 原生质感滚动条 ——— */
 .scroll-y { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--p-s4) transparent; }
@@ -470,7 +495,7 @@ input[type="range"].hg-range::-webkit-slider-thumb { -webkit-appearance: none; w
 .fs-landscape {
   position: absolute;
   top: 50%; left: 50%; right: auto; bottom: auto;
-  width: 100vh; height: 100vw;
+  width: 100vh; width: 100dvh; height: 100vw;
   transform: translate(-50%, -50%) rotate(90deg);
   transform-origin: center center;
 }

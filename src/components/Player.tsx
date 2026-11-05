@@ -1,11 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
-import Hls from "hls.js";
-import { fmtTime, playlist } from "../api";
+import { fmtTime } from "../api";
+import VideoSurface, { type VideoHandle } from "./VideoSurface";
 import { ICompress, IExpand, IPauseF, IPlayF, IVol, IVolMute } from "../icons";
 
 type Props = {
-  src: string;              // 原始 m3u8 地址
-  poster?: string;          // 已处理好的封面地址（本地协议）
+  src: string;
+  poster?: string;
   autoPlay?: boolean;
   muted?: boolean;
   loop?: boolean;
@@ -17,164 +17,83 @@ type Props = {
   className?: string;
 };
 
+/** Inline player shares the HLS/native-video path used by the full-screen feed. */
 export default function Player({
-  src, poster, autoPlay, muted = false, loop = false, onEnded, onPlaying,
+  src, poster, autoPlay = false, muted = false, loop = false, onEnded, onPlaying,
   onTogglePlay, onToggleMute, controls = true, className = "",
 }: Props) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<VideoHandle>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const hlsRef = useRef<Hls | null>(null);
   const [playing, setPlaying] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [full, setFull] = useState(false);
   const [rate, setRate] = useState(1);
-  const [errMsg, setErrMsg] = useState<string>("");
+  const [localMuted, setLocalMuted] = useState(muted);
+  const [error, setError] = useState("");
+  const effectiveMuted = onToggleMute ? muted : localMuted;
 
+  useEffect(() => { setLocalMuted(muted); }, [muted]);
+  useEffect(() => { setError(""); setTime(0); setDuration(0); }, [src]);
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !src) return;
-    const url = playlist(src);
-
-    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-
-    if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: false,
-        maxBufferLength: 24,
-        backBufferLength: 30,
-        manifestLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 3,
-        fragLoadingMaxRetry: 4,
-      });
-      hlsRef.current = hls;
-      hls.loadSource(url);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (autoPlay) video.play().catch(() => setPlaying(false));
-      });
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (!data.fatal) return;
-        const detail = `${data.type}/${data.details}/${data.response?.code ?? ""}/${String(data.reason ?? "").slice(0, 80)}`;
-        (window as unknown as { __hlsErr?: string }).__hlsErr = detail;
-        setErrMsg(detail);
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-        else { hls.destroy(); hlsRef.current = null; }
-      });
-    } else {
-      // Safari / 部分 WebView 原生支持 HLS
-      video.src = url;
-      if (autoPlay) video.play().catch(() => setPlaying(false));
-    }
-
-    return () => {
-      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-    };
-  }, [src, autoPlay]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = muted;
-  }, [muted]);
-
-  useEffect(() => {
-    const onFs = () => setFull(!!document.fullscreenElement);
+    const onFs = () => setFull(Boolean(document.fullscreenElement));
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  const toggle = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.paused) video.play().catch(() => {});
-    else video.pause();
-  };
-
-  const onSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const video = videoRef.current;
-    if (!video || !duration) return;
-    const pct = Number(e.target.value) / 1000;
-    video.currentTime = pct * duration;
-    setTime(video.currentTime);
-  };
-
-  const cycleRate = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    const next = rate === 1 ? 1.25 : rate === 1.25 ? 1.5 : rate === 1.5 ? 2 : 1;
-    video.playbackRate = next;
-    setRate(next);
+  const onSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (!duration) return;
+    const target = Number(event.target.value) / 1000 * duration;
+    videoRef.current?.seek(target);
+    setTime(target);
   };
 
   const toggleFull = () => {
-    const el = wrapRef.current;
-    if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else el.requestFullscreen().catch(() => {});
+    const wrapper = wrapRef.current;
+    if (!wrapper) return;
+    if (document.fullscreenElement && document.exitFullscreen) void document.exitFullscreen().catch(() => {});
+    else if (wrapper.requestFullscreen) void wrapper.requestFullscreen().catch(() => setError("此浏览器暂时无法全屏"));
+    else {
+      const video = videoRef.current?.el() as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
+      if (video?.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      else setError("此浏览器暂时无法全屏");
+    }
   };
 
-  const pct = duration > 0 ? (time / duration) * 100 : 0;
+  const toggleMute = () => {
+    if (onToggleMute) onToggleMute();
+    else setLocalMuted((value) => !value);
+  };
+  const percent = duration > 0 ? Math.min(100, time / duration * 100) : 0;
 
   return (
     <div ref={wrapRef} className={`relative bg-black overflow-hidden group ${className}`}>
-      <video
-        ref={videoRef}
-        poster={poster}
-        playsInline
-        loop={loop}
-        className="w-full h-full object-contain bg-black"
-        onClick={toggle}
-        onPlay={() => { setPlaying(true); onTogglePlay?.(true); }}
-        onPause={() => { setPlaying(false); onTogglePlay?.(false); }}
-        onWaiting={() => setWaiting(true)}
-        onPlaying={() => { setWaiting(false); onPlaying?.(); }}
-        onTimeUpdate={(e) => setTime((e.target as HTMLVideoElement).currentTime)}
-        onLoadedMetadata={(e) => setDuration((e.target as HTMLVideoElement).duration || 0)}
-        onEnded={() => onEnded?.()}
-      />
+      <VideoSurface ref={videoRef} src={src} poster={poster} autoPlay={autoPlay} muted={effectiveMuted} loop={loop} rate={rate}
+        onClick={() => videoRef.current?.toggle()}
+        onPlaying={() => { setPlaying(true); setWaiting(false); setError(""); onTogglePlay?.(true); onPlaying?.(); }}
+        onPause={() => { setPlaying(false); setWaiting(false); onTogglePlay?.(false); }}
+        onWaiting={() => setWaiting(true)} onTime={setTime} onDuration={setDuration} onEnded={onEnded}
+        onError={(message) => { setError(message); setWaiting(false); setPlaying(false); }} />
 
-      {errMsg && (
-        <div className="absolute left-2 top-2 z-30 max-w-[80%] rounded bg-black/70 px-2 py-1 text-[10px] leading-tight text-red-300 break-all">
-          {errMsg}
-        </div>
-      )}
-
-      {waiting && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="w-9 h-9 spinner" />
-        </div>
-      )}
-
+      {error && <div role="alert" className="absolute left-3 right-3 top-3 z-30 rounded bg-black/75 px-3 py-2 text-[12px] leading-relaxed text-red-200">{error}</div>}
+      {waiting && <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="w-9 h-9 spinner" /></div>}
       {!playing && !waiting && (
-        <button onClick={toggle} aria-label="播放"
-          className="absolute inset-0 flex items-center justify-center">
-          <span className="w-16 h-16 rounded-full bg-black/45 backdrop-blur-sm flex items-center justify-center elev-2 pressable">
-            <IPlayF size={26} className="text-white ml-0.5" />
-          </span>
+        <button onClick={() => videoRef.current?.play()} aria-label="播放" className="absolute inset-0 flex items-center justify-center">
+          <span className="w-16 h-16 rounded-full bg-black/45 backdrop-blur-sm flex items-center justify-center elev-2 pressable"><IPlayF size={26} className="text-white ml-0.5" /></span>
         </button>
       )}
-
       {controls && (
-        <div className="absolute inset-x-0 bottom-0 px-3 pb-2 pt-8 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
-          <input type="range" min={0} max={1000} value={Math.round(pct * 10)} onChange={onSeek}
-            className="hg-range w-full" style={{ "--fill": `${pct}%` } as React.CSSProperties} />
-          <div className="flex items-center gap-3 mt-1 text-white">
-            <button onClick={toggle} aria-label={playing ? "暂停" : "播放"} className="pressable">
-              {playing ? <IPauseF size={16} /> : <IPlayF size={16} />}
-            </button>
-            <button onClick={() => onToggleMute?.()} aria-label="静音" className="pressable">
-              {muted ? <IVolMute size={16} /> : <IVol size={16} />}
-            </button>
+        <div className="inline-player-controls absolute inset-x-0 bottom-0 px-3 pb-2 pt-8 bg-gradient-to-t from-black/80 to-transparent transition-opacity">
+          <input type="range" min={0} max={1000} value={Math.round(percent * 10)} onChange={onSeek} aria-label="播放进度"
+            className="hg-range w-full" style={{ "--fill": `${percent}%` } as React.CSSProperties} />
+          <div className="flex items-center gap-2 mt-1 text-white">
+            <button onClick={() => videoRef.current?.toggle()} aria-label={playing ? "暂停" : "播放"} className="min-w-9 min-h-9 flex items-center justify-center pressable">{playing ? <IPauseF size={16} /> : <IPlayF size={16} />}</button>
+            <button onClick={toggleMute} aria-label={effectiveMuted ? "开启声音" : "静音"} className="min-w-9 min-h-9 flex items-center justify-center pressable">{effectiveMuted ? <IVolMute size={16} /> : <IVol size={16} />}</button>
             <span className="text-[11px] tabular-nums text-white/85">{fmtTime(time)} / {fmtTime(duration)}</span>
             <div className="flex-1" />
-            <button onClick={cycleRate} className="text-[11px] font-bold text-white/85 pressable tabular-nums">{rate}x</button>
-            <button onClick={toggleFull} aria-label="全屏" className="pressable">
-              {full ? <ICompress size={16} /> : <IExpand size={16} />}
-            </button>
+            <button onClick={() => setRate((value) => value === 1 ? 1.25 : value === 1.25 ? 1.5 : value === 1.5 ? 2 : 1)} aria-label={`播放速度 ${rate} 倍`} className="min-w-9 min-h-9 text-[12px] font-semibold pressable">{rate}x</button>
+            <button onClick={toggleFull} aria-label={full ? "退出全屏" : "全屏"} className="min-w-9 min-h-9 flex items-center justify-center pressable">{full ? <ICompress size={16} /> : <IExpand size={16} />}</button>
           </div>
         </div>
       )}

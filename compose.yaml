@@ -1,0 +1,51 @@
+name: hghub
+
+services:
+  data-init:
+    image: ${HGHUB_INIT_IMAGE:-alpine:3.22}
+    user: "0:0"
+    network_mode: none
+    restart: "no"
+    command: ["sh", "-ec", "chown -R 1000:1000 /data && chmod 700 /data"]
+    volumes:
+      - ./data:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+
+  hghub:
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${HGHUB_NODE_IMAGE:-node:24-alpine}
+    image: hghub-web:local
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    environment:
+      HGHUB_AUTH_DISABLED: "true"
+      HGHUB_HOST: ${HGHUB_HOST:-0.0.0.0}
+      HGHUB_PORT: ${HGHUB_PORT:-3000}
+      HGHUB_PROXY: ${HGHUB_PROXY:-}
+      HGHUB_UPSTREAM_BASE: ${HGHUB_UPSTREAM_BASE:-https://huangguoai.com}
+      HGHUB_MEDIA_HOSTS: ${HGHUB_MEDIA_HOSTS:-}
+      HGHUB_PUBLIC_ORIGIN: ${HGHUB_PUBLIC_ORIGIN:-}
+      HGHUB_COOKIE_SECURE: ${HGHUB_COOKIE_SECURE:-false}
+    volumes:
+      - ./data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
