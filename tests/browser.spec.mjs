@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { access, baseURL, clipTitle, platformPassword, postTitle, proxyURL } from './fixture-config.mjs';
+import { access, baseURL, clipTitle, noLoginURL, platformPassword, postTitle, proxyURL } from './fixture-config.mjs';
 
 const navigation = (page) => page.getByRole('navigation', { name: '主导航' });
 async function tab(page, name) {
@@ -30,13 +30,75 @@ async function fixtureState(request) {
   expect(response.ok()).toBeTruthy();
   return response.json();
 }
+async function localTrafficOnly(context) {
+  await context.route(/^https?:\/\//, (route) => [baseURL, noLoginURL].includes(new URL(route.request().url()).origin)
+    ? route.continue() : route.abort('blockedbyclient'));
+}
 
 test.beforeEach(async ({ context, request }) => {
   const response = await request.post(`${proxyURL}/__fixture/reset`);
   expect(response.ok()).toBeTruthy();
   // No test may accidentally request a real platform or external image.
-  await context.route(/^https?:\/\//, (route) => new URL(route.request().url()).origin === baseURL
-    ? route.continue() : route.abort('blockedbyclient'));
+  await localTrafficOnly(context);
+});
+
+test('免网页登录直接进入、隐藏网站退出并隔离不同浏览器的平台账号', async ({ page, browser }, testInfo) => {
+  await page.goto(noLoginURL);
+  await expect(navigation(page)).toBeVisible();
+  await expect(page.getByLabel('访问账号', { exact: true })).toHaveCount(0);
+  await platformLogin(page, 'alice');
+  await expect(page.getByRole('heading', { name: '网络与代理' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '退出网页登录', exact: true })).toHaveCount(0);
+  await noHorizontalOverflow(page);
+
+  const other = await browser.newContext({
+    viewport: testInfo.project.use.viewport,
+    isMobile: testInfo.project.use.isMobile,
+    hasTouch: testInfo.project.use.hasTouch,
+    serviceWorkers: 'block',
+  });
+  try {
+    await localTrafficOnly(other);
+    const second = await other.newPage();
+    await second.goto(noLoginURL);
+    await expect(navigation(second)).toBeVisible();
+    await tab(second, '我的');
+    await expect(second.getByRole('textbox', { name: '平台账号', exact: true })).toBeVisible();
+    await platformLogin(second, 'bob');
+    await page.reload();
+    await tab(page, '我的');
+    await expect(page.getByText('@alice · ID 11', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: '退出网页登录', exact: true })).toHaveCount(0);
+  } finally { await other.close(); }
+});
+
+test('免登录会话自动恢复一次，持续失效时停止并允许手动重连', async ({ page }) => {
+  let attempts = 0;
+  let alwaysFail = false;
+  let allowRequests = false;
+  await page.route('**/api/rpc/app_boot', (route) => {
+    attempts += 1;
+    if (!allowRequests && (alwaysFail || attempts === 1)) {
+      return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: '会话已过期', code: 'AUTH_REQUIRED' }) });
+    }
+    return route.continue();
+  });
+  await page.goto(noLoginURL);
+  await expect.poll(() => attempts).toBe(2);
+  await expect(navigation(page)).toBeVisible();
+  await expect(page.getByLabel('访问密码', { exact: true })).toHaveCount(0);
+
+  alwaysFail = true;
+  attempts = 0;
+  await page.reload();
+  await expect.poll(() => attempts).toBe(2);
+  await expect(page.getByRole('button', { name: '重新连接', exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('无法保持浏览器会话');
+  await expect(page.getByLabel('访问密码', { exact: true })).toHaveCount(0);
+  allowRequests = true;
+  await page.getByRole('button', { name: '重新连接', exact: true }).click();
+  await expect.poll(() => attempts).toBe(3);
+  await expect(navigation(page)).toBeVisible();
 });
 
 test('网站登录校验、会话恢复、布局和退出', async ({ page }) => {

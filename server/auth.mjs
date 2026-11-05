@@ -51,24 +51,31 @@ export function publicUser(value) {
 }
 
 /**
- * One deployment account, independent browser sessions. Only a hash of each
+ * Optional deployment login, independent browser sessions. Only a hash of each
  * browser cookie is stored. Platform tokens stay in this private server file.
  */
 export async function createAuth({
   dataDir,
+  authDisabled = false,
   adminUsername = 'admin',
   adminPassword,
   cookieSecure = false,
   sessionTtlMs = SESSION_TTL_MS,
   now = Date.now,
 }) {
-  if (typeof adminUsername !== 'string' || !adminUsername.trim() || adminUsername.length > 128) {
-    throw new Error('HGHUB_ADMIN_USERNAME 必须是 1–128 个字符。');
+  if (typeof authDisabled !== 'boolean') {
+    throw new Error('authDisabled 必须是布尔值。');
   }
-  adminUsername = adminUsername.trim();
-  if (typeof adminPassword !== 'string' || adminPassword.length < 12 || adminPassword.length > 256) {
-    throw new Error('请设置 HGHUB_ADMIN_PASSWORD，长度需为 12–256 个字符。');
+  if (!authDisabled) {
+    if (typeof adminUsername !== 'string' || !adminUsername.trim() || adminUsername.length > 128) {
+      throw new Error('HGHUB_ADMIN_USERNAME 必须是 1–128 个字符。');
+    }
+    adminUsername = adminUsername.trim();
+    if (typeof adminPassword !== 'string' || adminPassword.length < 12 || adminPassword.length > 256) {
+      throw new Error('请设置 HGHUB_ADMIN_PASSWORD，长度需为 12–256 个字符。');
+    }
   }
+  const sessionUsername = authDisabled ? null : adminUsername;
   if (!Number.isSafeInteger(sessionTtlMs) || sessionTtlMs <= 0) {
     throw new Error('Invalid session lifetime');
   }
@@ -88,20 +95,23 @@ export async function createAuth({
   }
 
   const salt = saved?.salt ?? randomBytes(32).toString('hex');
-  const expectedKey = await deriveKey(adminPassword, salt, 64);
-  const expectedUsername = digest(adminUsername);
-  // Changing either configured credential invalidates cookies saved by older runs.
-  const credentialId = createHmac('sha256', expectedKey).update(adminUsername).digest('hex');
+  const expectedKey = authDisabled ? null : await deriveKey(adminPassword, salt, 64);
+  const expectedUsername = authDisabled ? null : digest(adminUsername);
+  // Changing login mode or configured credentials invalidates old cookies. In
+  // anonymous mode the persisted random salt replaces any configured secret.
+  const credentialId = createHmac('sha256', expectedKey ?? Buffer.from(salt, 'hex'))
+    .update(authDisabled ? 'anonymous\0' : 'password\0')
+    .update(sessionUsername ?? '').digest('hex');
   const sessions = new Map();
   if (saved?.credentialId === credentialId && Array.isArray(saved.sessions)) {
     for (const entry of saved.sessions.slice(-MAX_SESSIONS)) {
       if (!entry || !/^[a-f0-9]{64}$/.test(entry.id ?? '') ||
-          entry.username !== adminUsername || !Number.isFinite(entry.createdAt) ||
+          entry.username !== sessionUsername || !Number.isFinite(entry.createdAt) ||
           !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now()) continue;
       const token = typeof entry.upstream?.token === 'string' && entry.upstream.token.length <= 16_384
         ? entry.upstream.token : '';
       sessions.set(entry.id, {
-        id: entry.id, username: adminUsername,
+        id: entry.id, username: sessionUsername,
         createdAt: entry.createdAt, expiresAt: entry.expiresAt,
         upstream: { token, user: publicUser(entry.upstream?.user) },
         revision: Number.isSafeInteger(entry.revision) ? entry.revision : 0,
@@ -170,7 +180,38 @@ export async function createAuth({
     return `${COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${cookieSecure ? '; Secure' : ''}`;
   }
 
+  async function createSession(req) {
+    const previous = get(req);
+    if (previous) sessions.delete(previous.id);
+    pruneSessions();
+    while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
+    const token = randomBytes(32).toString('base64url');
+    const timestamp = now();
+    const session = {
+      id: sessionId(token), username: sessionUsername,
+      createdAt: timestamp, expiresAt: timestamp + sessionTtlMs,
+      upstream: { token: '', user: null }, revision: 0,
+    };
+    sessions.set(session.id, session);
+    try {
+      await persist();
+    } catch (error) {
+      sessions.delete(session.id);
+      throw error;
+    }
+    return { session, cookie: cookie(token) };
+  }
+
+  // Opening the app without a deployment login still creates a private browser
+  // session; upstream accounts must never be shared by all anonymous visitors.
+  async function getOrCreate(req) {
+    const session = get(req);
+    if (session || !authDisabled) return { session, cookie: null };
+    return createSession(req);
+  }
+
   async function login(req, credentials) {
+    if (authDisabled) return getOrCreate(req);
     const username = typeof credentials?.username === 'string' ? credentials.username.trim() : '';
     const password = credentials?.password;
     if (!username || username.length > 128 || typeof password !== 'string' || !password || password.length > 256) {
@@ -198,24 +239,7 @@ export async function createAuth({
     if (!valid) throw new HttpError(401, '用户名或密码错误。', 'INVALID_CREDENTIALS');
 
     limits.delete(ip);
-    const previous = get(req);
-    if (previous) sessions.delete(previous.id);
-    pruneSessions();
-    while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
-    const token = randomBytes(32).toString('base64url');
-    const session = {
-      id: sessionId(token), username: adminUsername,
-      createdAt: now(), expiresAt: now() + sessionTtlMs,
-      upstream: { token: '', user: null }, revision: 0,
-    };
-    sessions.set(session.id, session);
-    try {
-      await persist();
-    } catch (error) {
-      sessions.delete(session.id);
-      throw error;
-    }
-    return { session, cookie: cookie(token) };
+    return createSession(req);
   }
 
   async function logout(req) {
@@ -242,7 +266,8 @@ export async function createAuth({
 
   await persist();
   return {
-    get, login, logout, setUpstream, isCurrent,
+    get, getOrCreate, login, logout, setUpstream, isCurrent,
+    loginRequired: !authDisabled,
     clearCookie: () => cookie('', 0),
     close: () => writes,
   };

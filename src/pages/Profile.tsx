@@ -71,7 +71,7 @@ export default function Profile({ wide }: { wide: boolean }) {
               <Avatar size={52} icon={<IUser size={24} />} hue={220} />
               <div className="flex-1">
                 <div className="text-[15px] font-bold text-on">{mode === "login" ? "登录平台账号" : "注册平台账号"}</div>
-                <div className="text-[11px] text-mut mt-0.5">{isNative ? "使用原平台账号与密码" : "平台账号独立于网页访问账号"}</div>
+                <div className="text-[11px] text-mut mt-0.5">使用原平台账号与密码</div>
               </div>
             </div>
 

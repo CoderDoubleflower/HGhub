@@ -94,3 +94,60 @@ test('stale upstream requests cannot overwrite a more recent logout', async (t) 
     (error) => error.status === 409 && error.code === 'SESSION_CHANGED');
   assert.equal(session.upstream.token, '');
 });
+
+test('anonymous sessions need no configured secret and preserve separate platform accounts across restart', async (t) => {
+  const { auth, options, dataDir } = await fixture(t, {
+    authDisabled: true, adminUsername: undefined, adminPassword: undefined,
+  });
+  assert.equal(auth.loginRequired, false);
+  // Password protection remains the default, even if the saved state is anonymous.
+  await assert.rejects(() => createAuth({ dataDir }), /HGHUB_ADMIN_PASSWORD/);
+  const first = await auth.getOrCreate(request());
+  const second = await auth.getOrCreate(request());
+  assert.equal(first.session.username, null);
+  assert.notEqual(first.cookie, second.cookie);
+  assert.match(first.cookie, /HttpOnly; SameSite=Lax/);
+  const reused = await auth.getOrCreate(request(cookieValue(first.cookie)));
+  assert.equal(reused.session, first.session);
+  assert.equal(reused.cookie, null);
+  await auth.setUpstream(first.session, 'token-a', { id: 1 });
+  await auth.setUpstream(second.session, 'token-b', { id: 2 });
+  await auth.close();
+
+  // Irrelevant deployment credentials do not invalidate anonymous sessions.
+  const restarted = await createAuth({ ...options, adminUsername: '', adminPassword: '' });
+  assert.equal(restarted.get(request(cookieValue(first.cookie))).upstream.token, 'token-a');
+  assert.equal(restarted.get(request(cookieValue(second.cookie))).upstream.token, 'token-b');
+  await restarted.logout(request(cookieValue(first.cookie)));
+  const fresh = await restarted.getOrCreate(request(cookieValue(first.cookie)));
+  assert.notEqual(fresh.cookie, first.cookie);
+  assert.equal(fresh.session.upstream.token, '');
+  assert.equal(restarted.get(request(cookieValue(second.cookie))).upstream.token, 'token-b');
+  await restarted.close();
+});
+
+test('switching between password and anonymous modes invalidates cookies in both directions', async (t) => {
+  const { auth, options } = await fixture(t);
+  const passwordSession = await auth.login(request(), credentials);
+  await auth.close();
+
+  const anonymous = await createAuth({ ...options, authDisabled: true });
+  assert.equal(anonymous.get(request(cookieValue(passwordSession.cookie))), null);
+  const anonymousSession = await anonymous.getOrCreate(request());
+  await anonymous.setUpstream(anonymousSession.session, 'private-anonymous-token', { id: 1 });
+  await anonymous.close();
+
+  const protectedAuth = await createAuth(options);
+  assert.equal(protectedAuth.loginRequired, true);
+  assert.equal(protectedAuth.get(request(cookieValue(passwordSession.cookie))), null);
+  assert.equal(protectedAuth.get(request(cookieValue(anonymousSession.cookie))), null);
+  assert.deepEqual(await protectedAuth.getOrCreate(request(cookieValue(anonymousSession.cookie))),
+    { session: null, cookie: null });
+  const newPasswordSession = await protectedAuth.login(request(), credentials);
+  await protectedAuth.close();
+
+  const anonymousAgain = await createAuth({ ...options, authDisabled: true });
+  assert.equal(anonymousAgain.get(request(cookieValue(anonymousSession.cookie))), null);
+  assert.equal(anonymousAgain.get(request(cookieValue(newPasswordSession.cookie))), null);
+  await anonymousAgain.close();
+});

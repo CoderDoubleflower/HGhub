@@ -30,7 +30,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    // Build first with pnpm build; all upstream, media and proxy traffic stays local.
+    // Starts both access modes before this health check; all content stays local.
     command: 'node tests/fixture-server.mjs',
     url: `${baseURL}/healthz`,
     timeout: 30_000,

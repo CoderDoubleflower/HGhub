@@ -149,6 +149,7 @@ export async function createApp(options = {}) {
   const cookieSecure = options.cookieSecure ?? (env.HGHUB_COOKIE_SECURE === 'true' || publicOrigin?.startsWith('https://') || false);
   const auth = await createAuth({
     dataDir,
+    authDisabled: options.authDisabled ?? (env.HGHUB_AUTH_DISABLED === 'true'),
     adminUsername: options.adminUsername ?? env.HGHUB_ADMIN_USERNAME ?? 'admin',
     adminPassword: options.adminPassword ?? env.HGHUB_ADMIN_PASSWORD,
     cookieSecure,
@@ -157,6 +158,12 @@ export async function createApp(options = {}) {
   const network = options.network ?? await (await import('./net.mjs')).createNetwork({ dataDir, env });
   const media = options.media ?? (await import('./media.mjs')).createMediaHandler({ network });
   const rpc = createRpc({ network, auth, media });
+
+  async function browserSession(req, res) {
+    const { session, cookie } = await auth.getOrCreate(req);
+    if (cookie) res.setHeader('Set-Cookie', cookie);
+    return session;
+  }
 
   const server = createServer({ maxHeaderSize: 16 * 1024, requestTimeout: 30_000, headersTimeout: 15_000 }, async (req, res) => {
     securityHeaders(res);
@@ -175,16 +182,17 @@ export async function createApp(options = {}) {
         if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) checkMutation(req, publicOrigin);
         if (pathname === '/api/auth/session') {
           requireMethod(req, res, ['GET']);
-          const session = auth.get(req);
-          json(req, res, 200, { authenticated: Boolean(session), username: session?.username ?? null });
+          const session = await browserSession(req, res);
+          json(req, res, 200, { authenticated: Boolean(session), username: session?.username ?? null,
+            loginRequired: auth.loginRequired });
           return;
         }
         if (pathname === '/api/auth/login') {
           requireMethod(req, res, ['POST']);
           const body = await readJson(req);
           const { session, cookie } = await auth.login(req, body);
-          res.setHeader('Set-Cookie', cookie);
-          json(req, res, 200, { authenticated: true, username: session.username });
+          if (cookie) res.setHeader('Set-Cookie', cookie);
+          json(req, res, 200, { authenticated: true, username: session.username, loginRequired: auth.loginRequired });
           return;
         }
         if (pathname === '/api/auth/logout') {
@@ -194,7 +202,7 @@ export async function createApp(options = {}) {
           return;
         }
 
-        const session = auth.get(req);
+        const session = await browserSession(req, res);
         if (!session) {
           res.setHeader('Set-Cookie', auth.clearCookie());
           throw new HttpError(401, '请先登录网页。', 'AUTH_REQUIRED');
@@ -228,7 +236,7 @@ export async function createApp(options = {}) {
       }
       if (pathname.startsWith('/media/')) {
         requireMethod(req, res, ['GET', 'HEAD']);
-        if (!auth.get(req)) throw new HttpError(401, '请先登录网页。', 'AUTH_REQUIRED');
+        if (auth.loginRequired && !auth.get(req)) throw new HttpError(401, '请先登录网页。', 'AUTH_REQUIRED');
         await media.handle(req, res, url);
         return;
       }

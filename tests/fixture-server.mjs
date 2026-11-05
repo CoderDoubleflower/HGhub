@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../server/app.mjs';
 import { createNetwork } from '../server/net.mjs';
-import { access, baseURL, clipTitle, platformPassword, port, postTitle, proxyPort, proxyURL } from './fixture-config.mjs';
+import { access, baseURL, clipTitle, noLoginPort, noLoginURL, platformPassword, port, postTitle, proxyPort, proxyURL } from './fixture-config.mjs';
 
 const directory = dirname(fileURLToPath(import.meta.url));
 const mediaDirectory = join(directory, 'fixtures');
@@ -19,6 +19,8 @@ let tokenSequence = 0;
 let upstreamBase;
 let network;
 let app;
+let noLoginNetwork;
+let noLoginApp;
 
 function record(list, entry) { list.push(entry); if (list.length > 1000) list.shift(); }
 function json(res, status, data) {
@@ -152,7 +154,9 @@ const proxy = http.createServer(async (req, res) => {
   if (req.url === '/__fixture/reset' && req.method === 'POST') {
     try {
       await network.setProxy('');
+      await noLoginNetwork.setProxy('');
       app.media.clear();
+      noLoginApp.media.clear();
       requests.length = 0;
       proxyRequests.length = 0;
       platformSessions.clear();
@@ -192,6 +196,7 @@ async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
   await app?.close({ force: true });
+  await noLoginApp?.close({ force: true });
   await Promise.all([close(proxy), close(upstream)]);
   await rm(dataDir, { recursive: true, force: true });
   process.exitCode = code;
@@ -206,9 +211,16 @@ try {
     dataDir, env: {}, network, adminUsername: access.username, adminPassword: access.password,
     distDir: resolve(directory, '../dist'),
   });
+  const noLoginDataDir = join(dataDir, 'no-login');
+  noLoginNetwork = await createNetwork({ dataDir: noLoginDataDir, env: {}, upstreamBase, allowPrivateUpstream: true });
+  noLoginApp = await createApp({
+    dataDir: noLoginDataDir, env: {}, network: noLoginNetwork, authDisabled: true,
+    distDir: resolve(directory, '../dist'),
+  });
   await listen(proxy, proxyPort);
+  await listen(noLoginApp.server, noLoginPort);
   await listen(app.server, port);
-  console.log(`[fixture] app=${baseURL} proxy=${proxyURL}; local synthetic data only`);
+  console.log(`[fixture] app=${baseURL} noLogin=${noLoginURL} proxy=${proxyURL}; local synthetic data only`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void stop(); });
 } catch (error) {
   console.error('[fixture]', error.message);

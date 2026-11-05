@@ -54,8 +54,12 @@ export class ApiError extends Error {
   }
 }
 
+// Ignore failures from requests belonging to a session that was already replaced.
+let accessSessionRevision = 0;
+
 /** JSON transport shared by the access gate, settings and native-command adapter. */
 export async function webRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const sessionRevision = accessSessionRevision;
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 35_000);
   const headers = new Headers(init.headers);
@@ -70,7 +74,8 @@ export async function webRequest<T>(path: string, init: RequestInit = {}): Promi
     catch { throw new ApiError("服务返回了无效响应，请检查服务是否启动", response.status); }
     if (!response.ok) {
       const problem = result as { error?: string; code?: string };
-      if (response.status === 401 && problem.code === "AUTH_REQUIRED" && path !== "/api/auth/login") {
+      if (response.status === 401 && problem.code === "AUTH_REQUIRED"
+        && !path.startsWith("/api/auth/") && sessionRevision === accessSessionRevision) {
         window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
       }
       if (problem.code === "UPSTREAM_AUTH_REQUIRED") {
@@ -87,7 +92,7 @@ export async function webRequest<T>(path: string, init: RequestInit = {}): Promi
   }
 }
 
-export type AccessSession = { authenticated: boolean; username?: string };
+export type AccessSession = { authenticated: boolean; username?: string | null; loginRequired?: boolean };
 export type NetworkSettings = {
   proxyUrl: string;
   proxyConfigured: boolean;
@@ -97,7 +102,11 @@ export type NetworkSettings = {
 export type NetworkTest = { ok: boolean; status?: number; ms: number; error?: string };
 
 export const webApi = {
-  session: () => webRequest<AccessSession>("/api/auth/session"),
+  session: async () => {
+    const session = await webRequest<AccessSession>("/api/auth/session");
+    accessSessionRevision += 1;
+    return session;
+  },
   login: (username: string, password: string) => webRequest<AccessSession>("/api/auth/login", {
     method: "POST", body: JSON.stringify({ username, password }),
   }),

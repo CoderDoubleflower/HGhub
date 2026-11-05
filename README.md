@@ -11,17 +11,15 @@ Web / Windows / Android · Docker 部署 · 手机浏览器访问 · Fluent 设�
 
 ## Docker 网页版
 
-网页版保留现有界面和原生客户端，增加独立 Node.js 服务。iPhone、Android、电脑浏览器均可访问；网页访问账号与原有平台账号分开，平台登录态按浏览器会话隔离。所有接口、图片和视频使用同一套服务端代理配置。
+网页版保留现有界面和原生客户端，增加独立 Node.js 服务。默认 Compose 无需额外网页登录，使用 host 网络，服务端数据保存在当前目录的 `./data`。iPhone、Android、电脑浏览器均可访问；原平台登录态仍按浏览器会话隔离。所有接口、图片和视频使用同一套服务端代理配置。
 
 ```bash
-cp .env.example .env
-# 编辑 .env，设置 HGHUB_ADMIN_PASSWORD（至少 12 位），可同时修改用户名和端口
 docker compose up -d --build
 ```
 
-手机连接同一网络后，打开 `http://服务器局域网IP:3000`，用 `.env` 中的账号登录。在「我的」中可登录平台账号；「网络与代理」支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H，保存后立即生效，并提供连接测试。
+手机连接同一网络后，打开 `http://服务器局域网IP:3000` 即可使用。在「我的」中可登录平台账号；「网络与代理」支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H，保存后立即生效，并提供连接测试。
 
-容器访问宿主机代理时，可使用 `http://host.docker.internal:7890`；代理程序需允许来自容器的连接。配置和会话保存在 Docker 数据卷，重建容器后保留。
+host 网络下，宿主机代理可直接填写 `http://127.0.0.1:7890`。启动时自动准备 `./data` 的权限，应用仍以非 root 用户运行；配置和会话保存在该文件夹，重建容器后保留。默认配置面向 Linux Docker 主机。
 
 **完整说明：[Docker 部署、登录、代理与故障排查](docs/DOCKER.md)。**
 

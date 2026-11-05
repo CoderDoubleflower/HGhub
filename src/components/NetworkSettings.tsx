@@ -5,7 +5,7 @@ import { useAccess } from "./SiteAccess";
 import { ILink, ILogout } from "../icons";
 
 export default function NetworkSettings() {
-  const { username, logout } = useAccess();
+  const { username, loginRequired, logout } = useAccess();
   const { toast } = useStore();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [proxyUrl, setProxyUrl] = useState("");
@@ -85,19 +85,19 @@ export default function NetworkSettings() {
             </div>
             {editing && <p className="text-[11px] text-mut">{proxyUrl.trim() ? "新地址尚未保存。" : "保存后将停用当前代理，改为直连。"}</p>}
           </form>
-          <p className="mt-4 text-[11px] text-mut leading-relaxed">代理运行在宿主机时，可填写 <code>http://host.docker.internal:7890</code>；运行在其他设备时，填写该设备的局域网地址，并在代理软件中允许局域网连接。</p>
+          <p className="mt-4 text-[11px] text-mut leading-relaxed">默认使用 host 网络，宿主机上的代理可填写 <code>http://127.0.0.1:7890</code>；代理在其他设备上时，填写该设备的局域网地址，并在代理软件中允许局域网连接。</p>
           {result && <p role="status" className={`mt-3 text-[12px] leading-relaxed ${result.ok ? "text-primary" : "text-danger"}`}>{result.ok ? `连接成功 · HTTP ${result.status ?? 200} · ${result.ms} ms` : `连接失败：${result.error || (result.status ? `HTTP ${result.status}` : "请检查代理地址和网络")}`}</p>}
         </>
       ) : <button type="button" onClick={load} className="mt-3 text-primary text-[13px] min-h-11 pressable">重新读取设置</button>}
       {error && <p role="alert" className="mt-3 text-[12px] text-danger leading-relaxed break-words">{error}</p>}
-      <div className="mt-5 pt-4 border-t border-current/10 flex items-center gap-3">
+      {loginRequired && <div className="mt-5 pt-4 border-t border-current/10 flex items-center gap-3">
         <div className="flex-1 min-w-0 text-[12px] text-mut">访问账号 <span className="text-on break-all">{username}</span></div>
         <button type="button" disabled={leaving} onClick={async () => {
           setLeaving(true);
           try { await logout(); }
           catch (e) { setError((e as Error).message); setLeaving(false); }
         }} className="flex items-center gap-1.5 min-h-11 px-3 rounded-(--r-sm) text-[12px] bg-s3 pressable disabled:opacity-60"><ILogout size={14} />{leaving ? "退出中…" : "退出网页登录"}</button>
-      </div>
+      </div>}
     </section>
   );
 }

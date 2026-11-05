@@ -74,7 +74,7 @@ test('health and login assets are public; API, settings and media require a webs
   assert.match(response.headers.get('content-security-policy'), /script-src 'self'/);
   assert.match(await response.text(), /Fixture app/);
   response = await request('/api/auth/session');
-  assert.deepEqual(await response.json(), { authenticated: false, username: null });
+  assert.deepEqual(await response.json(), { authenticated: false, username: null, loginRequired: true });
   for (const path of ['/api/settings', '/media/img?u=https%3A%2F%2Fcdn.example%2Fcover.png']) {
     response = await request(path);
     assert.equal(response.status, 401);
@@ -98,7 +98,7 @@ test('website login checks origin, custom header, credentials and logout invalid
   assert.equal((await response.json()).code, 'INVALID_CREDENTIALS');
   const cookie = await login();
   response = await request('/api/auth/session', { cookie });
-  assert.deepEqual(await response.json(), { authenticated: true, username: 'admin' });
+  assert.deepEqual(await response.json(), { authenticated: true, username: 'admin', loginRequired: true });
   response = await request('/api/auth/logout', { method: 'POST', cookie });
   assert.equal(response.status, 200);
   assert.match(response.headers.get('set-cookie'), /Max-Age=0/);
@@ -125,6 +125,92 @@ test('platform account tokens stay on the server and different browser cookies n
   await rpc('api_logout', {}, a);
   assert.equal((await rpc('app_boot', {}, a)).body.data.logged_in, false);
   assert.equal((await rpc('app_boot', {}, b)).body.data.logged_in, true);
+});
+
+test('explicit anonymous mode starts without a password and bootstraps API access while media stays public', async (t) => {
+  const { request } = await fixture(t, {
+    env: { HGHUB_AUTH_DISABLED: 'true' }, adminPassword: undefined,
+  });
+  let response = await request('/api/auth/session');
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { authenticated: true, username: null, loginRequired: false });
+  const cookie = response.headers.get('set-cookie').split(';', 1)[0];
+  response = await request('/api/auth/session', { cookie });
+  assert.equal(response.headers.get('set-cookie'), null);
+  assert.deepEqual(await response.json(), { authenticated: true, username: null, loginRequired: false });
+
+  response = await request('/api/settings');
+  assert.equal(response.status, 200);
+  assert.ok(response.headers.get('set-cookie'));
+  assert.equal((await response.json()).proxyConfigured, false);
+  response = await request('/api/rpc/app_boot', { method: 'POST', body: {} });
+  assert.equal(response.status, 200);
+  assert.ok(response.headers.get('set-cookie'));
+  assert.equal((await response.json()).data.logged_in, false);
+
+  response = await request('/api/auth/login', { method: 'POST', body: {}, cookie });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('set-cookie'), null);
+  assert.deepEqual(await response.json(), { authenticated: true, username: null, loginRequired: false });
+  for (const method of ['GET', 'HEAD']) {
+    response = await request('/media/img?u=https%3A%2F%2Fcdn.example%2Fcover.png', { method });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.equal(await response.text(), method === 'GET' ? 'fixture' : '');
+  }
+});
+
+test('anonymous browsers keep independent platform accounts and logout only clears the current browser', async (t) => {
+  const { request, rpc } = await fixture(t, { authDisabled: true, adminPassword: undefined });
+  async function browserCookie() {
+    const response = await request('/api/auth/session');
+    assert.equal((await response.json()).authenticated, true);
+    return response.headers.get('set-cookie').split(';', 1)[0];
+  }
+  const alice = await browserCookie();
+  const bob = await browserCookie();
+  assert.notEqual(alice, bob);
+  assert.equal((await rpc('api_login', { username: 'alice', password: 'fixture' }, alice)).status, 200);
+  assert.equal((await rpc('api_login', { username: 'bob', password: 'fixture' }, bob)).status, 200);
+  assert.deepEqual((await rpc('app_boot', {}, alice)).body.data.user, { id: 1, username: 'alice' });
+  assert.deepEqual((await rpc('app_boot', {}, bob)).body.data.user, { id: 2, username: 'bob' });
+  assert.equal((await rpc('api_me', {}, alice)).body.data.nickname, 'Alice');
+  assert.equal((await rpc('api_me', {}, bob)).body.data.nickname, 'Bob');
+  await rpc('api_logout', {}, alice);
+  assert.equal((await rpc('app_boot', {}, alice)).body.data.logged_in, false);
+  assert.equal((await rpc('app_boot', {}, bob)).body.data.logged_in, true);
+
+  const logout = await request('/api/auth/logout', { method: 'POST', cookie: bob });
+  assert.equal(logout.status, 200);
+  assert.match(logout.headers.get('set-cookie'), /Max-Age=0/);
+  await logout.json();
+  const fresh = await request('/api/auth/session', { cookie: bob });
+  assert.deepEqual(await fresh.json(), { authenticated: true, username: null, loginRequired: false });
+  const newBob = fresh.headers.get('set-cookie').split(';', 1)[0];
+  assert.notEqual(newBob, bob);
+  assert.equal((await rpc('app_boot', {}, newBob)).body.data.logged_in, false);
+});
+
+test('anonymous mode still rejects foreign origins and missing mutation headers before creating sessions', async (t) => {
+  const { request, calls, cacheClears } = await fixture(t, { authDisabled: true, adminPassword: undefined });
+  for (const [path, options] of [
+    ['/api/settings', { method: 'PUT', body: { proxyUrl: 'http://proxy.example:8080' }, origin: 'https://other.example' }],
+    ['/api/settings', { method: 'PUT', body: { proxyUrl: 'http://proxy.example:8080' }, headers: { 'X-HGhub-Request': '' } }],
+    ['/api/rpc/api_login', { method: 'POST', body: { username: 'alice', password: 'fixture' }, origin: 'https://other.example' }],
+    ['/api/settings/test', { method: 'POST', headers: { 'X-HGhub-Request': '' } }],
+  ]) {
+    const response = await request(path, options);
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.equal((await response.json()).code, 'ORIGIN_REJECTED');
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(cacheClears(), 0);
+  const response = await request('/api/settings', { method: 'PUT', body: { proxyUrl: 'http://proxy.example:8080' } });
+  assert.equal(response.status, 200);
+  assert.ok(response.headers.get('set-cookie'));
+  assert.equal((await response.json()).proxyConfigured, true);
+  assert.equal(cacheClears(), 1);
 });
 
 test('RPC validates allowlisted commands and encodes queries; mutations require a platform account', async (t) => {
