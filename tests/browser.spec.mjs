@@ -150,26 +150,15 @@ async function touchTap(page, cdp, target) {
   }
 }
 
-async function checkTouchEnvironment(page, cdp, stage, restoreFrom = 0) {
-  const read = () => page.evaluate(() => ({
+async function checkTouchEnvironment(page, stage) {
+  const state = await page.evaluate(() => ({
     maxTouchPoints: navigator.maxTouchPoints,
     coarse: matchMedia('(pointer: coarse)').matches,
     viewport: { width: innerWidth, height: innerHeight, scale: visualViewport?.scale },
   }));
-  let state = await read();
   console.log('[mobile-seek] Touch environment:', JSON.stringify({ stage, ...state }));
-  if (restoreFrom > 0 && state.maxTouchPoints === 0) {
-    // Chromium can lose touch emulation after screenshot capture:
-    // https://github.com/microsoft/playwright/issues/42607
-    // Restore only a measured loss of the declared phone environment, never a failed tap.
-    const before = state;
-    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: restoreFrom });
-    state = await read();
-    console.log('[mobile-seek] Restored lost touch emulation:', JSON.stringify({ stage, before, after: state }));
-  }
   expect(state.maxTouchPoints, `${stage}: mobile touch support must remain enabled`).toBeGreaterThan(0);
   expect(state.coarse, `${stage}: the phone must retain a coarse pointer`).toBeTruthy();
-  return state;
 }
 
 test.beforeEach(async ({ context, request }) => {
@@ -296,7 +285,7 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
   try {
     await page.goto(noLoginURL);
     await expect(navigation(page)).toBeVisible();
-    await checkTouchEnvironment(page, cdp, 'initial', 1);
+    await checkTouchEnvironment(page, 'initial');
     // Establish navigation before any seek, resize, or screenshot can affect the input environment.
     await touchTap(page, cdp, navigation(page).getByRole('button', { name: '分类', exact: true }));
     await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
@@ -308,9 +297,9 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
     const video = page.locator('.player-root:visible video').first();
 
     for (const height of [844, 600]) {
-      const beforeResize = await checkTouchEnvironment(page, cdp, `before-resize-390x${height}`);
+      await checkTouchEnvironment(page, `before-resize-390x${height}`);
       await page.setViewportSize({ width: 390, height });
-      await checkTouchEnvironment(page, cdp, `after-resize-390x${height}`, beforeResize.maxTouchPoints);
+      await checkTouchEnvironment(page, `after-resize-390x${height}`);
       const box = await mobileSliderBox(slider);
       const navBox = await navigation(page).boundingBox();
       expect(navBox).not.toBeNull();
@@ -328,9 +317,9 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
         y: categoryBox.y + categoryBox.height / 2,
       });
       await expect(navigation(page).getByRole('button', { name: '首页', exact: true })).toHaveAttribute('aria-current', 'page');
-      const beforeScreenshot = await checkTouchEnvironment(page, cdp, `before-home-screenshot-390x${height}`);
+      await checkTouchEnvironment(page, `before-home-screenshot-390x${height}`);
       await page.screenshot({ path: testInfo.outputPath(`mobile-seek-home-390x${height}.png`) });
-      await checkTouchEnvironment(page, cdp, `after-home-screenshot-390x${height}`, beforeScreenshot.maxTouchPoints);
+      await checkTouchEnvironment(page, `after-home-screenshot-390x${height}`);
     }
 
     await touchTap(page, cdp, navigation(page).getByRole('button', { name: '分类', exact: true }));
@@ -344,9 +333,9 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
       y: contextBox.y + contextBox.height / 2,
     });
     await expect(navigation(page)).toHaveCount(0);
-    const beforeContextScreenshot = await checkTouchEnvironment(page, cdp, 'before-context-screenshot');
+    await checkTouchEnvironment(page, 'before-context-screenshot');
     await page.screenshot({ path: testInfo.outputPath('mobile-seek-context-390x600.png') });
-    await checkTouchEnvironment(page, cdp, 'after-context-screenshot', beforeContextScreenshot.maxTouchPoints);
+    await checkTouchEnvironment(page, 'after-context-screenshot');
     await touchTap(page, cdp, page.getByRole('button', { name: '返回', exact: true }).first());
     await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
     await touchTap(page, cdp, navigation(page).getByRole('button', { name: '首页', exact: true }));

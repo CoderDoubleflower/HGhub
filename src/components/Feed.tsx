@@ -438,7 +438,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
 
   const onBarDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!active || !canSeek || !e.isPrimary || e.button !== 0 || barPointer.current !== null) return;
-    e.preventDefault();
+    // touch-action and capture handle touch dragging while preserving native defaults.
+    if (e.pointerType === "mouse") e.preventDefault();
     e.stopPropagation();
     barPointer.current = e.pointerId;
     if (e.pointerType === "mouse") e.currentTarget.focus({ preventScroll: true });
@@ -447,13 +448,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   };
   const onBarMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (barPointer.current !== e.pointerId) return;
-    e.preventDefault();
+    if (e.pointerType === "mouse") e.preventDefault();
     e.stopPropagation();
     barSeekTo(e.clientX, e.clientY);
   };
   const onBarUp = (e: React.PointerEvent<HTMLDivElement>) => {
     if (barPointer.current !== e.pointerId) return;
-    e.preventDefault();
+    if (e.pointerType === "mouse") e.preventDefault();
     e.stopPropagation();
     const pct = barPctAt(e.clientX, e.clientY);
     clearBarScrub();
