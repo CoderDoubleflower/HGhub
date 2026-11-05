@@ -95,6 +95,61 @@ async function touchSeek(page, cdp, video, slider, box, release) {
   expect(await video.evaluate((element) => element.currentTime)).toBeGreaterThan(before.time + before.duration * 0.25);
 }
 
+async function touchTap(page, cdp, target) {
+  await expect(target).toBeVisible();
+  await expect(target).toBeEnabled();
+  await target.scrollIntoViewIfNeeded();
+  const point = await target.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    return { x, y, hit: element.contains(document.elementFromPoint(x, y)) };
+  });
+  expect(point.hit, 'The real touch tap must hit the requested control').toBeTruthy();
+  await target.evaluate((element) => {
+    window.__mobileTapTrace = [];
+    const controller = new AbortController();
+    window.__stopMobileTapTrace = () => controller.abort();
+    const record = (event, phase) => {
+      const node = event.target;
+      const entry = {
+        type: event.type, phase, trusted: event.isTrusted,
+        atTarget: node instanceof Node && element.contains(node),
+        target: node instanceof Element ? `${node.tagName} ${node.getAttribute('aria-label') || node.textContent?.trim().slice(0, 60) || ''}` : String(node),
+        pointerType: event.pointerType, pointerId: event.pointerId, isPrimary: event.isPrimary,
+        defaultPrevented: event.defaultPrevented,
+        capturedBySlider: typeof event.pointerId === 'number' && [...document.querySelectorAll('[role="slider"]')]
+          .some((slider) => slider.hasPointerCapture(event.pointerId)),
+        changedTouches: [...(event.changedTouches || [])].map((touch) => ({ id: touch.identifier, x: touch.clientX, y: touch.clientY })),
+      };
+      window.__mobileTapTrace.push(entry);
+      // Record prevention by React even when it stops propagation before the document bubble phase.
+      setTimeout(() => { entry.defaultPreventedAfterDispatch = event.defaultPrevented; }, 0);
+    };
+    for (const type of ['pointerdown', 'pointerup', 'pointercancel', 'gotpointercapture', 'lostpointercapture', 'touchstart', 'touchend', 'touchcancel', 'click']) {
+      for (const capture of [true, false]) {
+        document.addEventListener(type, (event) => record(event, capture ? 'capture' : 'bubble'),
+          { capture, passive: true, signal: controller.signal });
+      }
+    }
+  });
+  try {
+    // Keep taps on the same touch input session as dragging. Playwright's shortcut
+    // sends start/end concurrently on its own session; a finger stays down for a frame.
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [
+      { x: point.x, y: point.y, id: 1, radiusX: 1, radiusY: 1, force: 1 },
+    ] });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect.poll(() => page.evaluate(() => ['pointerdown', 'pointerup', 'click'].every((type) =>
+      window.__mobileTapTrace.some((event) => event.type === type && event.trusted && event.atTarget
+        && (type === 'click' || event.pointerType === 'touch')),
+    )), { message: 'The control must receive trusted touch pointerdown/up and a real click' }).toBeTruthy();
+  } finally {
+    await page.evaluate(() => window.__stopMobileTapTrace?.()).catch(() => {});
+  }
+}
+
 test.beforeEach(async ({ context, request }) => {
   const response = await request.post(`${proxyURL}/__fixture/reset`);
   expect(response.ok()).toBeTruthy();
@@ -246,9 +301,9 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
       await page.screenshot({ path: testInfo.outputPath(`mobile-seek-home-390x${height}.png`) });
     }
 
-    await navigation(page).getByRole('button', { name: '分类', exact: true }).tap();
+    await touchTap(page, cdp, navigation(page).getByRole('button', { name: '分类', exact: true }));
     await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
-    await page.getByRole('button', { name: new RegExp(clipTitle) }).first().tap();
+    await touchTap(page, cdp, page.getByRole('button', { name: new RegExp(clipTitle) }).first());
     await expect(navigation(page)).toHaveCount(0);
     const contextBox = await mobileSliderBox(slider);
     expect(contextBox.y + contextBox.height).toBeLessThanOrEqual(600 - 34);
@@ -258,10 +313,14 @@ test('手机安全区内进度条避开导航，真实触摸可拖动并支持�
     });
     await expect(navigation(page)).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('mobile-seek-context-390x600.png') });
-    await page.getByRole('button', { name: '返回', exact: true }).first().tap();
+    await touchTap(page, cdp, page.getByRole('button', { name: '返回', exact: true }).first());
     await expect(navigation(page).getByRole('button', { name: '分类', exact: true })).toHaveAttribute('aria-current', 'page');
-    await navigation(page).getByRole('button', { name: '首页', exact: true }).tap();
+    await touchTap(page, cdp, navigation(page).getByRole('button', { name: '首页', exact: true }));
     await expect(navigation(page).getByRole('button', { name: '首页', exact: true })).toHaveAttribute('aria-current', 'page');
+  } catch (error) {
+    const events = await page.evaluate(() => window.__mobileTapTrace ?? []).catch(() => []);
+    console.error('[mobile-seek] Last tap events:', JSON.stringify(events));
+    throw error;
   } finally {
     await cdp.detach();
   }

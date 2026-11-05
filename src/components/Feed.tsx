@@ -441,7 +441,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     e.preventDefault();
     e.stopPropagation();
     barPointer.current = e.pointerId;
-    e.currentTarget.focus({ preventScroll: true });
+    if (e.pointerType === "mouse") e.currentTarget.focus({ preventScroll: true });
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     barSeekTo(e.clientX, e.clientY);
   };
